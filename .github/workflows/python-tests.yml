@@ -1,0 +1,52 @@
+name: tests general
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 4
+      matrix:
+        include:
+          # Matches tox.ini (non-torch envs only)
+          - python-version: "3.10"
+            toxenv: py310-tf218
+          - python-version: "3.10"
+            toxenv: py310-tf219
+          - python-version: "3.10"
+            toxenv: py310-tf220
+
+          - python-version: "3.11"
+            toxenv: py311-tf218
+          - python-version: "3.11"
+            toxenv: py311-tf219
+          - python-version: "3.11"
+            toxenv: py311-tf220
+
+          - python-version: "3.12"
+            toxenv: py312-tf218
+          - python-version: "3.12"
+            toxenv: py312-tf219
+          - python-version: "3.12"
+            toxenv: py312-tf220
+
+          - python-version: "3.13"
+            toxenv: py313-tf220
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+      - name: Create virtualenv and install tox
+        run: |
+          uv venv
+          . .venv/bin/activate
+          uv pip install --upgrade pip
+          uv pip install tox tox-uv
+      - name: Test with tox (${{ matrix.toxenv }})
+        run: |
+          . .venv/bin/activate
+          tox -e ${{ matrix.toxenv }}
