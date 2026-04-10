@@ -17,7 +17,6 @@ setup(
     ],
     extras_require = {
         'yolo': ['ultralytics>=8.0.0'],
-        'detr': ['transformers'],
         'torchvision': ['torchvision'],
         'retinanet': ['keras-cv'],
         'test': [
@@ -26,7 +25,7 @@ setup(
             'pillow',
             'matplotlib',
         ],
-        'all': ['ultralytics>=8.0.0', 'transformers', 'torchvision', 'keras-cv'],
+        'all': ['ultralytics>=8.0.0', 'torchvision', 'keras-cv'],
     },
     classifiers=[
         "Development Status :: 4 - Beta",
