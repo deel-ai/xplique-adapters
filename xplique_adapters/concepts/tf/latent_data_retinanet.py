@@ -19,12 +19,57 @@ import tensorflow as tf
 from keras_cv.src import bounding_box
 from keras_cv.src.backend import ops
 from keras_cv.src.bounding_box.converters import _decode_deltas_to_boxes
+from xplique.utils_functions.object_detection.base.box_manager import BoxFormat, BoxType
 from xplique.concepts.latent_extractor import LatentData, LatentExtractorBuilder
 from xplique.concepts.tf.latent_extractor import TfLatentExtractor
 
 from xplique_adapters.object_detection.tf import (
     RetinaNetProcessedBoxFormatter,
 )
+
+
+def _decode_retinanet_predictions(
+    model, cls_pred, box_pred, image_shape, anchor_image_shape=None
+):
+    """Decode RetinaNet head outputs into normalized ``rel_xyxy`` predictions."""
+    model_box_format = getattr(model, "bounding_box_format", None)
+    if model_box_format is None:
+        raise ValueError(
+            "RetinaNet model must define bounding_box_format to decode latent "
+            "predictions."
+        )
+
+    box_variance = [0.1, 0.1, 0.2, 0.2]
+    if anchor_image_shape is None:
+        anchor_image_shape = image_shape
+        if not tf.executing_eagerly():
+            static_shape = tf.get_static_value(image_shape)
+            if static_shape is not None:
+                anchor_image_shape = tuple(int(value) for value in static_shape)
+    anchors = model.anchor_generator(image_shape=anchor_image_shape)
+    anchors = ops.concatenate(list(anchors.values()), axis=0)
+    boxes = _decode_deltas_to_boxes(
+        anchors=anchors,
+        boxes_delta=box_pred,
+        anchor_format=model.anchor_generator.bounding_box_format,
+        box_format=model_box_format,
+        variance=box_variance,
+        image_shape=image_shape,
+    )
+    boxes = bounding_box.convert_format(
+        boxes,
+        source=model_box_format,
+        target="rel_xyxy",
+        image_shape=image_shape,
+    )
+
+    probas = ops.sigmoid(cls_pred)
+    return {
+        "boxes": boxes,
+        "scores": probas,
+        "confidence": ops.max(probas, axis=-1),
+        "classes": ops.argmax(probas, axis=-1),
+    }
 
 
 class TfLatentDataRetinanet(LatentData):
@@ -58,7 +103,11 @@ class TfLatentDataRetinanet(LatentData):
     image_shape: tuple
 
     def __init__(
-        self, resnet_features: dict, image_shape: tuple, index_activations: int = -1
+        self,
+        resnet_features: dict,
+        image_shape: tuple,
+        index_activations: int = -1,
+        anchor_image_shape: tuple | None = None,
     ) -> None:
         """
         Initialize RetinaNet latent data with feature maps and image shape.
@@ -75,6 +124,7 @@ class TfLatentDataRetinanet(LatentData):
         self.resnet_features = resnet_features
         self.image_shape = image_shape
         self.index_activations = index_activations
+        self.anchor_image_shape = anchor_image_shape
 
     def __len__(self) -> int:
         """
@@ -135,10 +185,11 @@ class TfLatentDataRetinanet(LatentData):
         ValueError
             If any feature map contains negative values.
         """
-        for feature in self.resnet_features:
-            if tf.reduce_any(feature < 0):
+        for name, feature in self.resnet_features.items():
+            feature = tf.convert_to_tensor(feature)
+            if bool(tf.reduce_any(feature < 0)):
                 raise ValueError(
-                    "Features contain negative values, which is unexpected."
+                    f"Feature {name!r} contains negative values, which is unexpected."
                 )
 
     def set_activations(self, values: tf.Tensor | np.ndarray) -> None:
@@ -155,27 +206,27 @@ class TfLatentDataRetinanet(LatentData):
         TypeError
             If values is not a tf.Tensor or np.ndarray.
         """
-        key = list(self.resnet_features.keys())[self.index_activations]
-        if isinstance(values, tf.Tensor):
-            self.resnet_features[key] = values
-        elif isinstance(values, np.ndarray):
-            self.resnet_features[key] = tf.convert_to_tensor(values)
-        else:
+        if not isinstance(values, (tf.Tensor, np.ndarray)):
             raise TypeError(
                 f"Unsupported type: {type(values)}. Expected tf.Tensor or np.ndarray"
             )
 
+        values = tf.convert_to_tensor(values)
+        key = list(self.resnet_features.keys())[self.index_activations]
+        self.resnet_features[key] = values
+
         # When a perturbation-based explainer batches multiple perturbed
         # coefficients, all feature maps must match the new batch size.
-        # All items are perturbations of the same single image so tiling is safe.
-        new_batch_size = self.resnet_features[key].shape[0]
-        if new_batch_size is not None:
-            for k in self.resnet_features:
-                feat = self.resnet_features[k]
-                if feat.shape[0] != new_batch_size:
-                    self.resnet_features[k] = tf.repeat(
-                        feat[:1], new_batch_size, axis=0
-                    )
+        # All items are perturbations of the same single image, so repetition is safe.
+        new_batch_size = tf.shape(values)[0]
+        if values.shape[0] == 0:
+            raise ValueError("Replacement activations cannot have an empty batch.")
+        for k, feature in self.resnet_features.items():
+            if k != key:
+                feature = tf.convert_to_tensor(feature)
+                if feature.shape[0] == 0:
+                    raise ValueError(f"Feature {k!r} has an empty source batch.")
+                self.resnet_features[k] = tf.repeat(feature[:1], new_batch_size, axis=0)
 
 
 class RetinaNetExtractorBuilder(LatentExtractorBuilder):
@@ -219,8 +270,9 @@ class RetinaNetExtractorBuilder(LatentExtractorBuilder):
             backbone_outputs = self.feature_extractor(samples, training=False)
             return TfLatentDataRetinanet(
                 backbone_outputs,
-                tuple(samples[0].shape),
+                tf.shape(samples)[1:4],
                 index_activations=index_activations,
+                anchor_image_shape=tuple(samples.shape[1:4]),
             )
 
         def h(self, latent_data: TfLatentDataRetinanet) -> dict:
@@ -247,62 +299,21 @@ class RetinaNetExtractorBuilder(LatentExtractorBuilder):
                 [tf.reshape(b, [tf.shape(b)[0], -1, 4]) for b in box_outputs], axis=1
             )
 
-            # 5. If training=False, apply post-processing
-            # if not training:
-            def decode_predictions_reworked(predictions, image_shape):
-                box_variance = [0.1, 0.1, 0.2, 0.2]
-                box_pred, cls_pred = predictions["box"], predictions["classification"]
-                # box_pred is on "center_yxhw" format, convert to target format.
-                # image_shape = tuple(images[0].shape)
-                anchors = model.anchor_generator(image_shape=image_shape)
-                anchors = ops.concatenate(list(anchors.values()), axis=0)
-
-                box_pred = _decode_deltas_to_boxes(
-                    anchors=anchors,
-                    boxes_delta=box_pred,
-                    anchor_format=model.anchor_generator.bounding_box_format,
-                    box_format=model.bounding_box_format,
-                    variance=box_variance,
-                    image_shape=image_shape,
-                )
-                # box_pred is now in "self.bounding_box_format" format
-                box_pred = bounding_box.convert_format(
-                    box_pred,
-                    source=model.bounding_box_format,
-                    target=model.prediction_decoder.bounding_box_format,
-                    image_shape=image_shape,
-                )
-
-                # fonction a remplacer: model.prediction_decoder()
-                # (self, box_prediction, class_prediction, images=None, image_shape=None)
-                box_prediction = box_pred
-                class_prediction = cls_pred
-
-                # Logits to probas
-                predictions = ops.sigmoid(class_prediction)
-                # predicted_class = ops.argmax(predictions, axis=-1)
-                # Take the class with the highest confidence
-                confidence = ops.max(predictions, axis=-1)
-                classes = ops.argmax(predictions, axis=-1)
-
-                bounding_boxes = {
-                    "boxes": box_prediction,
-                    "scores": predictions,
-                    "confidence": confidence,
-                    "classes": classes,
-                }
-                return bounding_boxes
-
-            return decode_predictions_reworked(
-                {"classification": cls_outputs, "box": box_outputs}, image_shape
+            return _decode_retinanet_predictions(
+                model,
+                cls_outputs,
+                box_outputs,
+                image_shape,
+                anchor_image_shape=latent_data.anchor_image_shape,
             )
 
         model.h = types.MethodType(h, model)
         model.g = types.MethodType(g, model)
 
-        processed_formatter = RetinaNetProcessedBoxFormatter(
-            nb_classes=nb_classes,
-            image_size=(640, 640),
+        processed_formatter = RetinaNetProcessedBoxFormatter._from_box_types(
+            nb_classes,
+            input_box_type=BoxType(BoxFormat.XYXY, is_normalized=True),
+            output_box_type=BoxType(BoxFormat.XYXY, is_normalized=True),
         )
         latent_extractor = TfLatentExtractor(
             model,
