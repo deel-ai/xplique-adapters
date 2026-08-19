@@ -9,9 +9,7 @@ from xplique_adapters.object_detection.torch import (
 
 def _predictions(batch_size=1, num_queries=2, num_foreground_classes=2):
     return {
-        "pred_logits": torch.randn(
-            batch_size, num_queries, num_foreground_classes + 1
-        ),
+        "pred_logits": torch.randn(batch_size, num_queries, num_foreground_classes + 1),
         "pred_boxes": torch.rand(batch_size, num_queries, 4),
     }
 
