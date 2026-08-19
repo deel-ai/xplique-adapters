@@ -116,9 +116,17 @@ class LatentDataDetr(LatentData):
         List of NestedTensor objects containing backbone feature maps at different scales.
     pos
         List of positional encoding tensors corresponding to each feature scale.
+    selected_index
+        Index of the feature level exposed as activations and consumed by the
+        DETR decoder. The final level is selected by default.
     """
 
-    def __init__(self, features: list, pos: list[torch.Tensor]):
+    def __init__(
+        self,
+        features: list,
+        pos: list[torch.Tensor],
+        selected_index: int = -1,
+    ):
         """
         Initialize DETR latent data with features and positional encodings.
 
@@ -128,9 +136,12 @@ class LatentDataDetr(LatentData):
             List of NestedTensor objects from the backbone.
         pos
             List of positional encoding tensors.
+        selected_index
+            Index of the selected feature level. Defaults to the final level.
         """
         self.features = features
         self.pos = pos
+        self.selected_index = selected_index
 
     def __len__(self) -> int:
         """
@@ -141,7 +152,7 @@ class LatentDataDetr(LatentData):
         batch_size
             Number of samples in the batch.
         """
-        return len(self.features[0].tensors)
+        return len(self.features[self.selected_index].tensors)
 
     def detach(self) -> None:
         """
@@ -150,9 +161,11 @@ class LatentDataDetr(LatentData):
         This method detaches features and positional encodings, preventing
         gradient computation through these tensors.
         """
-        self.features[0].tensors = self.features[0].tensors.detach()
-        self.features[0].mask = self.features[0].mask.detach()
-        self.pos[0] = self.pos[0].detach()
+        for feature in self.features:
+            feature.tensors = feature.tensors.detach()
+            if feature.mask is not None:
+                feature.mask = feature.mask.detach()
+        self.pos = [position.detach() for position in self.pos]
 
     def to(self, device: torch.device) -> "LatentDataDetr":
         """
@@ -168,15 +181,9 @@ class LatentDataDetr(LatentData):
         latent_data
             New LatentDataDetr instance with data on the target device.
         """
-        # Create a new instance with data moved to the specified device
-        new_features = [
-            NestedTensor(
-                tensors=self.features[0].tensors.to(device),
-                mask=self.features[0].mask.to(device),
-            )
-        ]
-        new_pos = [self.pos[0].to(device)]
-        return LatentDataDetr(new_features, new_pos)
+        new_features = [feature.to(device) for feature in self.features]
+        new_pos = [position.to(device) for position in self.pos]
+        return LatentDataDetr(new_features, new_pos, self.selected_index)
 
     def get_activations(
         self, as_numpy: bool = True, keep_gradients: bool = False
@@ -197,7 +204,7 @@ class LatentDataDetr(LatentData):
             Feature tensors as numpy array or PyTorch tensor. If 4D (N, C, H, W),
             converted to (N, H, W, C) format for compatibility.
         """
-        activations = self.features[0].tensors
+        activations = self.features[self.selected_index].tensors
 
         if not keep_gradients:
             activations = activations.detach()
@@ -227,18 +234,26 @@ class LatentDataDetr(LatentData):
         if is_4d:
             values = values.permute(0, 3, 1, 2)
 
-        self.features[0].tensors = values
+        selected_feature = self.features[self.selected_index]
+        selected_feature.tensors = values
 
         # When a perturbation-based explainer batches multiple perturbed
         # coefficients, mask and pos must match the new batch size.
-        # All items are perturbations of the same single image so expand is safe.
+        # All items are perturbations of the same single image, so repeat its
+        # batch companions from the first item.
         new_batch_size = values.shape[0]
-        if self.features[0].mask.shape[0] != new_batch_size:
-            self.features[0].mask = (
-                self.features[0].mask[:1].expand(new_batch_size, -1, -1)
+        if (
+            selected_feature.mask is not None
+            and selected_feature.mask.shape[0] != new_batch_size
+        ):
+            selected_feature.mask = selected_feature.mask[:1].repeat(
+                (new_batch_size,) + (1,) * (selected_feature.mask.ndim - 1)
             )
-        if self.pos[0].shape[0] != new_batch_size:
-            self.pos[0] = self.pos[0][:1].expand(new_batch_size, -1, -1, -1)
+        position = self.pos[self.selected_index]
+        if position.shape[0] != new_batch_size:
+            self.pos[self.selected_index] = position[:1].repeat(
+                (new_batch_size,) + (1,) * (position.ndim - 1)
+            )
 
 
 class DetrExtractorBuilder(LatentExtractorBuilder):
