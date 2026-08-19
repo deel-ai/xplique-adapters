@@ -132,6 +132,10 @@ class LatentDataRetinanet(LatentData):
         """
         Update the feature map at the specified index with new activation values.
 
+        The selected feature determines the perturbation batch size. Other feature
+        levels and image metadata are repeated from their first item because every
+        output represents a perturbation of one source image.
+
         Parameters
         ----------
         values
@@ -147,6 +151,27 @@ class LatentDataRetinanet(LatentData):
 
         current_key = list(self.features.keys())[self.extraction_layer]
         self.features[current_key] = values
+
+        new_batch_size = values.shape[0]
+        if new_batch_size == 0:
+            raise ValueError("Replacement activations cannot have an empty batch.")
+        for key, feature in self.features.items():
+            if key == current_key:
+                continue
+            if feature.shape[0] == 0:
+                raise ValueError(f"Feature {key!r} has an empty source batch.")
+            repeats = (new_batch_size,) + (1,) * (feature.ndim - 1)
+            self.features[key] = feature[:1].repeat(repeats)
+
+        if not self.images.image_sizes:
+            raise ValueError("ImageList image_sizes cannot be empty when rebatching.")
+        if not self.original_image_sizes:
+            raise ValueError("original_image_sizes cannot be empty when rebatching.")
+        self.images = torchvision.models.detection.image_list.ImageList(
+            self.images.tensors,
+            self.images.image_sizes[:1] * new_batch_size,
+        )
+        self.original_image_sizes = self.original_image_sizes[:1] * new_batch_size
 
     def to(self, device: torch.device) -> "LatentData":
         """
@@ -174,7 +199,7 @@ class LatentDataRetinanet(LatentData):
         )
 
 
-class RetinanetExtractorBuilder(LatentExtractorBuilder):
+class RetinaNetExtractorBuilder(LatentExtractorBuilder):
     """
     Builder for creating LatentExtractor instances for RetinaNet models.
 

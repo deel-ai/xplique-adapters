@@ -302,11 +302,14 @@ def build_latent_extractor(model_name, model, config, device, framework="torch",
         )
 
     if model_name == "retinanet":
-        from xplique_adapters.concepts.torch.latent_data_retinanet import RetinanetExtractorBuilder
+        from xplique_adapters.concepts.torch.latent_data_retinanet import RetinaNetExtractorBuilder
         nb_classes = len(COCO_CLASSES)
-        return RetinanetExtractorBuilder.build(model, device=device,
-                                               nb_classes=nb_classes,
-                                               extraction_layer=config["extraction_layer"])
+        return RetinaNetExtractorBuilder.build(
+            model,
+            device=device,
+            nb_classes=nb_classes,
+            extraction_layer=config["extraction_layer"],
+        )
 
     if model_name == "fasterrcnn":
         from xplique_adapters.concepts.torch.latent_data_faster_rcnn import (
