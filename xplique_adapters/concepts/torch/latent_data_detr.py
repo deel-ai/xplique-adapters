@@ -298,6 +298,7 @@ class DetrExtractorBuilder(LatentExtractorBuilder):
         latent_extractor
             Configured TorchLatentExtractor instance for the DETR model.
         """
+        selected_index = -1
 
         def nested_tensor_from_tensor_list(tensor_list: list[Tensor]):
             # TODO make this more general
@@ -391,15 +392,20 @@ class DetrExtractorBuilder(LatentExtractorBuilder):
                 samples = nested_tensor_from_tensor_list(samples)
             features, pos = self.backbone(samples)
 
-            return LatentDataDetr(features, pos)
+            return LatentDataDetr(features, pos, selected_index=selected_index)
 
         def h(self, latent_data: LatentDataDetr):
             features, pos = latent_data.features, latent_data.pos
 
-            src, mask = features[-1].decompose()
-            assert mask is not None
+            src, mask = features[selected_index].decompose()
+            if mask is None:
+                mask = torch.zeros(
+                    (src.shape[0], src.shape[-2], src.shape[-1]),
+                    dtype=torch.bool,
+                    device=src.device,
+                )
             hs = self.transformer(
-                self.input_proj(src), mask, self.query_embed.weight, pos[-1]
+                self.input_proj(src), mask, self.query_embed.weight, pos[selected_index]
             )[0]
 
             outputs_class = self.class_embed(hs)
