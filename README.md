@@ -218,7 +218,6 @@ All `LatentData` classes expose:
 2. Implement a **wrapper** subclassing `TorchBoxesModelWrapper` or `TfBoxesModelWrapper`, instantiating your formatter in `__init__`.
 3. Export both from the relevant `__init__.py`.
 4. If CRAFT support is needed, implement a `LatentData` subclass and a `LatentExtractorBuilder`.
-5. Add an optional dependency in `setup.py` under `extras_require` for the new model's package.
 6. Add tests under `tests/`.
 
 ---
