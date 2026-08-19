@@ -145,8 +145,13 @@ wrapper = TorchvisionBoxesModelWrapper(model, nb_classes=91)  # COCO
 
 | Class | Role | Details |
 |---|---|---|
-| `RetinaNetProcessedBoxFormatter` | Formatter | Converts keras-cv RetinaNet predictions (`boxes`, `confidence`, `classes`) to Xplique format. Handles XYWH → XYXY conversion and one-hot class encoding. |
-| `RetinaNetBoxesModelWrapper` | Wrapper | Wraps a keras-cv RetinaNet model with `RetinaNetProcessedBoxFormatter`. |
+| `RetinaNetProcessedBoxFormatter` | Formatter | Formats decoded batched predictions (`boxes[B,N,4]`, `confidence[B,N]`, `classes[B,N]`, optional `num_detections[B]` and per-class `scores[B,N,C]`). Uses absolute `xywh` input and normalized `xyxy` output. |
+| `RetinaNetBoxesModelWrapper` | Wrapper | Wraps a KerasCV RetinaNet in `prediction_mode="raw"` (default, calls `decode_predictions`) or explicit `prediction_mode="decoded"`. |
+
+RetinaNet public image sizes use `(height, width)`. Padding rows are removed
+according to `num_detections`; without that field all rows are retained. The
+wrapper infers KerasCV's `bounding_box_format` from the model and supports
+`xyxy`, `xywh`, `center_xywh`, `rel_xyxy`, and `rel_xywh` formats.
 
 **Usage:**
 
@@ -155,7 +160,9 @@ import keras_cv
 from xplique_adapters.object_detection.tf import RetinaNetBoxesModelWrapper
 
 model = keras_cv.models.RetinaNet(...)
-wrapper = RetinaNetBoxesModelWrapper(model, nb_classes=80)
+wrapper = RetinaNetBoxesModelWrapper(
+    model, nb_classes=80, image_size=(640, 640), prediction_mode="raw"
+)
 ```
 
 ---
@@ -176,7 +183,7 @@ Each latent extractor pair consists of:
 |---|---|---|---|
 | `LatentDataYolo` | `YoloExtractorBuilder` | Ultralytics YOLO | Stores main activation `x` + list of skip-connection tensors `y` |
 | `LatentDataDetr` | `DetrExtractorBuilder` | HuggingFace DETR | Includes `NestedTensor` helper for variable-size inputs and masking |
-| `LatentDataRetinanet` | `RetinanetExtractorBuilder` | torchvision RetinaNet | Multi-scale FPN features as `OrderedDict`; `extraction_layer` selects which scale |
+| `LatentDataRetinanet` | `RetinaNetExtractorBuilder` | torchvision RetinaNet | Multi-scale FPN features as `OrderedDict`; perturbation rebatching repeats companion features and image metadata |
 | `LatentDataFasterRcnn` | `FasterRcnnExtractorBuilder` | torchvision Faster R-CNN | Multi-scale ResNet/FPN features; `extraction_layer` selects which scale |
 | `LatentDataFcos` | `FcosExtractorBuilder` | torchvision FCOS | Multi-scale FPN features; `extraction_layer` selects which scale |
 | `LatentDataSSD` | `SSDExtractorBuilder` | torchvision SSD (MobileNetV3) | Backbone features as dict; `extraction_layer` selects which feature map |
