@@ -263,7 +263,8 @@ class DetrExtractorBuilder(LatentExtractorBuilder):
     This class provides methods to construct a TorchLatentExtractor specifically
     configured for DETR (Detection Transformer) object detection models. It defines
     the forward pass split into backbone feature extraction (g) and transformer-based
-    prediction (h).
+    prediction (h). It is compatible with the caller-supplied Facebook DETR
+    reference model only; use DetrBoxesModelWrapper for HuggingFace DETR models.
     """
 
     @classmethod
@@ -298,6 +299,33 @@ class DetrExtractorBuilder(LatentExtractorBuilder):
         latent_extractor
             Configured TorchLatentExtractor instance for the DETR model.
         """
+        required_attributes = (
+            "backbone",
+            "transformer",
+            "input_proj",
+            "query_embed",
+            "class_embed",
+            "bbox_embed",
+        )
+        missing_attributes = [
+            name for name in required_attributes if getattr(model, name, None) is None
+        ]
+        if missing_attributes:
+            missing = ", ".join(missing_attributes)
+            raise TypeError(
+                "DetrExtractorBuilder requires Facebook DETR attributes; "
+                f"missing: {missing}. DetrExtractorBuilder is "
+                "Facebook-reference-compatible only; use DetrBoxesModelWrapper "
+                "for HuggingFace models."
+            )
+        if getattr(model, "aux_loss", False) and not callable(
+            getattr(model, "_set_aux_loss", None)
+        ):
+            raise TypeError(
+                "DetrExtractorBuilder requires callable model._set_aux_loss "
+                "when model.aux_loss is enabled."
+            )
+
         selected_index = -1
 
         def nested_tensor_from_tensor_list(tensor_list: list[Tensor]):
