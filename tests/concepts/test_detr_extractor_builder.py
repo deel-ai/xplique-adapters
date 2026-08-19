@@ -69,6 +69,7 @@ def test_selected_index_is_consistently_the_last_backbone_level():
     first_feature = latent_data.features[0].tensors.clone()
     first_position = latent_data.pos[0].clone()
 
+    assert isinstance(latent_data, LatentDataDetr)
     assert latent_data.selected_index == -1
     assert len(latent_data) == 1
     assert latent_data.get_activations(as_numpy=False).shape == (1, 4, 4, 2)
@@ -163,9 +164,7 @@ def test_split_detr_path_preserves_input_gradients():
     samples = torch.randn(1, 3, 4, 4, requires_grad=True)
 
     latent_data = extractor.input_to_latent(samples)
-    activations = latent_data.get_activations(
-        as_numpy=False, keep_gradients=True
-    )
+    activations = latent_data.get_activations(as_numpy=False, keep_gradients=True)
     latent_data.set_activations(activations)
     predictions = model.h(latent_data)
     formatted = extractor.output_formatter(predictions)[0]
