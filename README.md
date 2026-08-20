@@ -149,9 +149,13 @@ wrapper = TorchvisionBoxesModelWrapper(model, nb_classes=91)  # COCO
 | `RetinaNetBoxesModelWrapper` | Wrapper | Wraps a KerasCV RetinaNet in `prediction_mode="raw"` (default, calls `decode_predictions`) or explicit `prediction_mode="decoded"`. |
 
 RetinaNet public image sizes use `(height, width)`. Padding rows are removed
-according to `num_detections`; without that field all rows are retained. The
-wrapper infers KerasCV's `bounding_box_format` from the model and supports
+according to `num_detections`; without that field all valid rows are retained
+and class `-1` rows are treated as padding. The wrapper infers KerasCV's
+`bounding_box_format` from the model and supports
 `xyxy`, `xywh`, `center_xywh`, `rel_xyxy`, and `rel_xywh` formats.
+Decoded callables without either format attribute must pass an explicit
+`input_box_type`; normalized `rel_` formats do not require `image_size`, while
+absolute formats do.
 
 **Usage:**
 
