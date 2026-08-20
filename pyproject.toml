@@ -68,7 +68,7 @@ docs = [
 ]
 build = [
   "build",
-  "bump-my-version",
+  "bump-my-version>=0.33.0",
   "check-wheel-contents",
   "twine",
 ]
@@ -135,10 +135,6 @@ module = ["numpy.*", "sklearn.*"]
 ignore_missing_imports = true
 
 [tool.bumpversion]
-current_version = "0.1.0"
 commit = true
 tag = false
 allow_dirty = false
-
-[[tool.bumpversion.files]]
-filename = "pyproject.toml"
