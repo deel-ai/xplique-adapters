@@ -1,7 +1,10 @@
+from contextlib import redirect_stdout
 from collections import OrderedDict
+from io import StringIO
 
 import torch
 import torchvision
+import xplique_adapters.concepts.torch.latent_data_retinanet as retinanet_module
 
 from xplique_adapters.concepts.torch.latent_data_retinanet import (
     LatentDataRetinanet,
@@ -127,3 +130,23 @@ def test_retinanet_latent_data_rebatches_features_and_metadata():
 
 def test_retinanet_builder_uses_canonical_name():
     assert RetinaNetExtractorBuilder.__name__ == "RetinaNetExtractorBuilder"
+
+
+def test_retinanet_builder_does_not_write_to_stdout(monkeypatch):
+    """
+    Test that the builder does no longer print to stdout, and
+    uses logging instead
+    """
+    class Model:
+        pass
+
+    class FakeExtractor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(retinanet_module, "TorchLatentExtractor", FakeExtractor)
+    output = StringIO()
+    with redirect_stdout(output):
+        RetinaNetExtractorBuilder.build(Model(), device="cpu")
+
+    assert output.getvalue() == ""
