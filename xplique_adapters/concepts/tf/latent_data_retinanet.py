@@ -31,7 +31,36 @@ from xplique_adapters.object_detection.tf import (
 def _decode_retinanet_predictions(
     model, cls_pred, box_pred, image_shape, anchor_image_shape=None
 ):
-    """Decode RetinaNet head outputs into normalized ``rel_xyxy`` predictions."""
+    """Decode RetinaNet head outputs into normalized ``rel_xyxy`` predictions.
+
+    Parameters
+    ----------
+    model
+        KerasCV RetinaNet model exposing ``bounding_box_format``,
+        ``anchor_generator``, and the generator's ``bounding_box_format``.
+    cls_pred
+        Classification logits with shape ``(batch, detections, classes)``.
+    box_pred
+        Box deltas with shape ``(batch, detections, 4)``.
+    image_shape
+        Tensor or sequence containing ``(height, width, channels)``. This
+        shape is used for delta decoding and output normalization.
+    anchor_image_shape
+        Optional Python-compatible image shape for anchor generation. When it
+        is omitted, ``image_shape`` is used and a statically known TensorFlow
+        shape is converted to a tuple in graph mode.
+
+    Returns
+    -------
+    predictions
+        Mapping containing decoded ``boxes`` in ``rel_xyxy`` format, per-class
+        ``scores``, maximum ``confidence``, and integer ``classes``.
+
+    Raises
+    ------
+    ValueError
+        If the model does not declare ``bounding_box_format``.
+    """
     model_box_format = getattr(model, "bounding_box_format", None)
     if model_box_format is None:
         raise ValueError(
@@ -73,12 +102,15 @@ def _decode_retinanet_predictions(
 
 
 class TfLatentDataRetinanet(LatentData):
-    """
-    Stores latent representations (feature maps) from RetinaNet's ResNet backbone.
+    """Store RetinaNet's multi-scale backbone features and image shape.
 
     This class encapsulates the multi-scale feature pyramid outputs from the ResNet
     backbone of a RetinaNet model. Features are typically stored as a dictionary with
     keys like 'P3', 'P4', 'P5' representing different pyramid levels.
+
+    When an explainer replaces the selected activation with a perturbation
+    batch, all companion feature levels are materially repeated from their
+    first item. The selected activation's leading dimension is authoritative.
 
     Attributes
     ----------
@@ -92,6 +124,10 @@ class TfLatentDataRetinanet(LatentData):
         Tuple representing the shape of the input image (height, width, channels).
     index_activations
         Index specifying which feature map to use as activations. Default is -1 (last feature).
+    anchor_image_shape
+        Optional static ``(height, width, channels)`` shape supplied to the
+        anchor generator. KerasCV anchor generation may require Python values
+        when the decoder runs inside a TensorFlow graph.
     """
 
     index_activations = -1
@@ -120,6 +156,9 @@ class TfLatentDataRetinanet(LatentData):
             Tuple representing the input image shape.
         index_activations
             Index specifying which feature map to use. Default is -1.
+        anchor_image_shape
+            Optional static image shape for anchor generation, usually captured
+            from the input shape during the extractor's feature pass.
         """
         self.resnet_features = resnet_features
         self.image_shape = image_shape
@@ -194,7 +233,11 @@ class TfLatentDataRetinanet(LatentData):
 
     def set_activations(self, values: tf.Tensor | np.ndarray) -> None:
         """
-        Update the feature map at the specified index.
+        Update the selected feature and re-batch companion feature levels.
+
+        The replacement activation's leading dimension determines the number
+        of perturbations. Every other feature level is repeated from its first
+        item because all outputs represent perturbations of one source image.
 
         Parameters
         ----------
@@ -212,20 +255,21 @@ class TfLatentDataRetinanet(LatentData):
             )
 
         values = tf.convert_to_tensor(values)
-        key = list(self.resnet_features.keys())[self.index_activations]
-        self.resnet_features[key] = values
-
         # When a perturbation-based explainer batches multiple perturbed
         # coefficients, all feature maps must match the new batch size.
         # All items are perturbations of the same single image, so repetition is safe.
-        new_batch_size = tf.shape(values)[0]
         if values.shape[0] == 0:
             raise ValueError("Replacement activations cannot have an empty batch.")
+        key = list(self.resnet_features.keys())[self.index_activations]
+        for name, feature in self.resnet_features.items():
+            if name != key and feature.shape[0] == 0:
+                raise ValueError(f"Feature {name!r} has an empty source batch.")
+
+        new_batch_size = tf.shape(values)[0]
+        self.resnet_features[key] = values
         for k, feature in self.resnet_features.items():
             if k != key:
                 feature = tf.convert_to_tensor(feature)
-                if feature.shape[0] == 0:
-                    raise ValueError(f"Feature {k!r} has an empty source batch.")
                 self.resnet_features[k] = tf.repeat(feature[:1], new_batch_size, axis=0)
 
 
@@ -260,6 +304,13 @@ class RetinaNetExtractorBuilder(LatentExtractorBuilder):
             Index specifying which feature pyramid level to use as activations. Default is -1.
         batch_size
             Batch size for processing. Default is 1.
+
+        Notes
+        -----
+        ``g`` snapshots the statically known input shape for anchor generation.
+        ``h`` still uses the TensorFlow ``image_shape`` tensor for decoding and
+        normalization, so the same ``(height, width, channels)`` convention is
+        preserved throughout the latent path.
         Returns
         -------
         latent_extractor
