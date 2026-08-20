@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 import tensorflow as tf
+from xplique.utils_functions.object_detection.base.box_manager import BoxFormat, BoxType
 
 from xplique_adapters.concepts.tf.latent_data_retinanet import (
     TfLatentDataRetinanet,
@@ -45,6 +46,17 @@ def test_retinanet_formatter_removes_padding_and_converts_rectangular_boxes():
     np.testing.assert_allclose(results[0].probas().numpy(), [[0.0, 1.0]])
 
 
+def test_retinanet_formatter_filters_padding_without_num_detections():
+    predictions = _decoded_predictions()
+    predictions.pop("num_detections")
+    predictions["classes"] = tf.constant([[1, -1]], dtype=tf.int32)
+    formatter = RetinaNetProcessedBoxFormatter(2, image_size=(100, 200))
+
+    result = formatter(predictions)[0]
+
+    assert result.shape == (1, 7)
+
+
 def test_retinanet_formatter_accepts_per_class_scores():
     predictions = _decoded_predictions(num_boxes=2)
     predictions["scores"] = tf.constant([[[0.1, 0.9], [0.7, 0.3]]])
@@ -65,7 +77,7 @@ def test_retinanet_formatter_rejects_invalid_score_shape():
 
 
 def test_retinanet_formatter_requires_dimensions_for_pixel_conversion():
-    with pytest.raises(ValueError, match="image size"):
+    with pytest.raises(ValueError, match="image_size"):
         RetinaNetProcessedBoxFormatter(2)(_decoded_predictions(num_boxes=1))
 
 
@@ -77,7 +89,11 @@ def test_retinanet_wrapper_decoded_mode_forwards_kwargs():
         return _decoded_predictions(batch_size=x.shape[0], num_boxes=1)
 
     wrapper = RetinaNetBoxesModelWrapper(
-        model, 2, image_size=(100, 200), prediction_mode="decoded"
+        model,
+        2,
+        image_size=(100, 200),
+        prediction_mode="decoded",
+        input_box_type=BoxType(BoxFormat.XYWH, is_normalized=False),
     )
     results = wrapper(tf.zeros((2, 100, 200, 3)), training=True)
 
@@ -147,6 +163,71 @@ def test_retinanet_wrapper_raw_mode_requires_decoder():
         wrapper(tf.zeros((1, 100, 200, 3)))
 
 
+def test_retinanet_wrapper_uses_explicit_box_type_without_model_metadata():
+    def model(x):
+        return _decoded_predictions(batch_size=x.shape[0], num_boxes=1)
+
+    wrapper = RetinaNetBoxesModelWrapper(
+        model,
+        2,
+        image_size=(100, 200),
+        prediction_mode="decoded",
+        input_box_type=BoxType(BoxFormat.XYWH, is_normalized=False),
+    )
+
+    results = wrapper(tf.zeros((1, 100, 200, 3)))
+
+    assert len(results) == 1
+    assert results[0].shape == (1, 7)
+
+
+def test_retinanet_wrapper_requires_explicit_box_type_without_metadata():
+    wrapper = RetinaNetBoxesModelWrapper(
+        lambda x: _decoded_predictions(batch_size=x.shape[0], num_boxes=1),
+        2,
+        image_size=(100, 200),
+        prediction_mode="decoded",
+    )
+
+    with pytest.raises(ValueError, match="input_box_type"):
+        wrapper(tf.zeros((1, 100, 200, 3)))
+
+
+def test_retinanet_wrapper_relative_boxes_do_not_require_image_size():
+    class RelativeModel:
+        bounding_box_format = "rel_xyxy"
+
+        def __call__(self, x):
+            return {
+                "boxes": tf.constant([[[0.1, 0.2, 0.6, 0.8]]]),
+                "confidence": tf.ones((1, 1)),
+                "classes": tf.zeros((1, 1), dtype=tf.int32),
+            }
+
+    wrapper = RetinaNetBoxesModelWrapper(
+        RelativeModel(),
+        1,
+        prediction_mode="decoded",
+    )
+
+    result = wrapper(tf.zeros((1, 100, 200, 3)))[0]
+
+    np.testing.assert_allclose(result.boxes().numpy(), [[0.1, 0.2, 0.6, 0.8]])
+
+
+def test_retinanet_wrapper_rejects_non_mapping_decoded_predictions():
+    wrapper = RetinaNetBoxesModelWrapper(
+        lambda x: tf.zeros((1, 1, 4)),
+        2,
+        image_size=(100, 200),
+        prediction_mode="decoded",
+        input_box_type=BoxType(BoxFormat.XYWH, is_normalized=False),
+    )
+
+    with pytest.raises(ValueError, match="must be a mapping"):
+        wrapper(tf.zeros((1, 100, 200, 3)))
+
+
 def test_tf_retinanet_latent_data_rebatches_and_checks_all_features():
     latent_data = TfLatentDataRetinanet(
         {
@@ -176,6 +257,23 @@ def test_tf_retinanet_latent_data_rebatches_and_checks_all_features():
     )
     with pytest.raises(ValueError, match="P4"):
         invalid_data.check_features_positive()
+
+
+def test_tf_retinanet_empty_replacement_does_not_mutate_selected_feature():
+    selected = tf.ones((1, 2, 2, 1))
+    latent_data = TfLatentDataRetinanet(
+        {
+            "P3": selected,
+            "P4": tf.ones((1, 1, 1, 1)),
+        },
+        tf.constant([100, 200, 3]),
+        index_activations=0,
+    )
+
+    with pytest.raises(ValueError, match="empty batch"):
+        latent_data.set_activations(tf.zeros((0, 2, 2, 1)))
+
+    assert latent_data.resnet_features["P3"] is selected
 
 
 def test_tf_retinanet_latent_decoder_uses_model_format_without_decoder():
