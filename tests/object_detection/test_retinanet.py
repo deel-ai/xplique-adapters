@@ -224,7 +224,7 @@ def test_retinanet_wrapper_rejects_non_mapping_decoded_predictions():
         input_box_type=BoxType(BoxFormat.XYWH, is_normalized=False),
     )
 
-    with pytest.raises(ValueError, match="must be a mapping"):
+    with pytest.raises(TypeError, match="must be a mapping"):
         wrapper(tf.zeros((1, 100, 200, 3)))
 
 

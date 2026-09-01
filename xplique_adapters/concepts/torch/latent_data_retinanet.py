@@ -25,7 +25,6 @@ from xplique.concepts.torch.latent_extractor import TorchLatentExtractor
 
 from ...object_detection.torch import TorchvisionBoxFormatter
 
-
 logger = logging.getLogger(__name__)
 
 
