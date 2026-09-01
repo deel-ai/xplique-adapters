@@ -15,7 +15,6 @@ from xplique.utils_functions.object_detection.torch.multi_box_tensor import (
     TorchMultiBoxTensor,
 )
 
-
 _MISSING = object()
 
 
