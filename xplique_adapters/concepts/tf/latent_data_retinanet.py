@@ -19,9 +19,9 @@ import tensorflow as tf
 from keras_cv.src import bounding_box
 from keras_cv.src.backend import ops
 from keras_cv.src.bounding_box.converters import _decode_deltas_to_boxes
-from xplique.utils_functions.object_detection.base.box_manager import BoxFormat, BoxType
 from xplique.concepts.latent_extractor import LatentData, LatentExtractorBuilder
 from xplique.concepts.tf.latent_extractor import TfLatentExtractor
+from xplique.utils_functions.object_detection.base.box_manager import BoxFormat, BoxType
 
 from xplique_adapters.object_detection.tf import (
     RetinaNetProcessedBoxFormatter,
