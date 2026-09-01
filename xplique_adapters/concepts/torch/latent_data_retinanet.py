@@ -12,6 +12,7 @@ are modified from the upstream source and are licensed under the BSD 3-Clause
 License. See https://github.com/pytorch/vision/blob/main/LICENSE.
 """
 
+import logging
 import types
 from collections import OrderedDict
 
@@ -23,6 +24,8 @@ from xplique.concepts.latent_extractor import LatentData, LatentExtractorBuilder
 from xplique.concepts.torch.latent_extractor import TorchLatentExtractor
 
 from ...object_detection.torch import TorchvisionBoxFormatter
+
+logger = logging.getLogger(__name__)
 
 
 class LatentDataRetinanet(LatentData):
@@ -43,6 +46,10 @@ class LatentDataRetinanet(LatentData):
         OrderedDict of feature maps at different scales.
     extraction_layer
         Index specifying which feature map to use as activations. Default is -1 (last feature).
+
+    Replacing activations re-batches all companion feature levels and both
+    image-size metadata lists from their first item. ``images.tensors`` is
+    intentionally shared because it is not used to represent perturbations.
     """
 
     def __init__(
@@ -89,7 +96,8 @@ class LatentDataRetinanet(LatentData):
         Detach all feature tensors from the computation graph.
 
         This method detaches all feature maps, preventing gradient computation
-        through these tensors.
+        through these tensors. Image tensors and their size metadata are not
+        changed.
         """
         for key, value in self.features.items():
             self.features[key] = value.detach()
@@ -132,11 +140,21 @@ class LatentDataRetinanet(LatentData):
         """
         Update the feature map at the specified index with new activation values.
 
+        The selected feature determines the perturbation batch size. Other feature
+        levels and image metadata are repeated from their first item because every
+        output represents a perturbation of one source image.
+
         Parameters
         ----------
         values
             New feature tensor values. Expected format is (N, H, W, C), which will
             be converted to PyTorch's (N, C, H, W) format.
+
+        Notes
+        -----
+        The selected feature's batch dimension controls the output batch. The
+        first feature and metadata entry are repeated for each perturbation;
+        repetition is materialized rather than represented by a zero-stride view.
         """
 
         # tensorflow/numpy -> torch
@@ -146,7 +164,31 @@ class LatentDataRetinanet(LatentData):
             values = values.permute(0, 3, 1, 2)
 
         current_key = list(self.features.keys())[self.extraction_layer]
+        new_batch_size = values.shape[0]
+        if new_batch_size == 0:
+            raise ValueError("Replacement activations cannot have an empty batch.")
+        if not self.images.image_sizes:
+            raise ValueError("ImageList image_sizes cannot be empty when rebatching.")
+        if not self.original_image_sizes:
+            raise ValueError("original_image_sizes cannot be empty when rebatching.")
+        for key, feature in self.features.items():
+            if key == current_key:
+                continue
+            if feature.shape[0] == 0:
+                raise ValueError(f"Feature {key!r} has an empty source batch.")
+
         self.features[current_key] = values
+        for key, feature in self.features.items():
+            if key == current_key:
+                continue
+            repeats = (new_batch_size,) + (1,) * (feature.ndim - 1)
+            self.features[key] = feature[:1].repeat(repeats)
+
+        self.images = torchvision.models.detection.image_list.ImageList(
+            self.images.tensors,
+            self.images.image_sizes[:1] * new_batch_size,
+        )
+        self.original_image_sizes = self.original_image_sizes[:1] * new_batch_size
 
     def to(self, device: torch.device) -> "LatentData":
         """
@@ -160,7 +202,8 @@ class LatentDataRetinanet(LatentData):
         Returns
         -------
         latent_data
-            New LatentDataRetinanet instance with data on the target device.
+            New ``LatentDataRetinanet`` instance with feature and image tensors
+            on the target device. Size metadata remains unchanged.
         """
         images = torchvision.models.detection.image_list.ImageList(
             self.images.tensors.to(device), self.images.image_sizes
@@ -174,7 +217,7 @@ class LatentDataRetinanet(LatentData):
         )
 
 
-class RetinanetExtractorBuilder(LatentExtractorBuilder):
+class RetinaNetExtractorBuilder(LatentExtractorBuilder):
     """
     Builder for creating LatentExtractor instances for RetinaNet models.
 
@@ -311,11 +354,10 @@ class RetinanetExtractorBuilder(LatentExtractorBuilder):
         model.g = types.MethodType(g, model)
         model.h = types.MethodType(h, model)
 
-        # Determine which key will be extracted (for informative logging)
-        # We need to simulate what will happen in g() to know the feature keys
-        # For now, we'll just print the extraction parameters
-        print(
-            f"Building RetinaNet extractor: extracting from '{extraction_location}' at layer index {extraction_layer}"
+        logger.debug(
+            "Building RetinaNet extractor: extracting from '%s' at layer index %s",
+            extraction_location,
+            extraction_layer,
         )
 
         processed_formatter = TorchvisionBoxFormatter(nb_classes=nb_classes)

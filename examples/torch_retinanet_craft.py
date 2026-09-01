@@ -24,7 +24,7 @@ import xplique
 from xplique.concepts import HolisticCraftTorch as Craft
 from xplique.plots import plot_image_detections
 from xplique_adapters.concepts.torch.latent_data_retinanet import (
-    RetinanetExtractorBuilder,
+    RetinaNetExtractorBuilder,
 )
 
 # Configuration parameters
@@ -120,7 +120,7 @@ label_to_color = {
 }
 
 # Build latent extractor (needed for predictions)
-latent_extractor = RetinanetExtractorBuilder.build(
+latent_extractor = RetinaNetExtractorBuilder.build(
     model, device=str(device), nb_classes=nb_classes, extraction_layer=-1
 )
 
