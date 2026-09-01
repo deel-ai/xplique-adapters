@@ -208,7 +208,7 @@ class RetinaNetProcessedBoxFormatter(TfBaseBoxFormatter):
             class IDs are invalid, or image dimensions are required but absent.
         """
         if not isinstance(predictions, Mapping):
-            raise ValueError(
+            raise TypeError(
                 "RetinaNet predictions must be a mapping containing "
                 "'boxes', 'confidence', and 'classes'."
             )

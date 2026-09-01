@@ -16,7 +16,6 @@ from xplique_adapters.object_detection.tf.retinanet_formatters import (
     RetinaNetProcessedBoxFormatter,
 )
 
-
 _SUPPORTED_BOX_FORMATS = frozenset(
     {"xyxy", "xywh", "center_xywh", "rel_xyxy", "rel_xywh"}
 )
@@ -194,7 +193,7 @@ class RetinaNetBoxesModelWrapper(TfBoxesModelWrapper):
             If KerasCV is unavailable while a conversion is required.
         """
         if not isinstance(predictions, Mapping):
-            raise ValueError(
+            raise TypeError(
                 "RetinaNet decoded predictions must be a mapping containing "
                 "'boxes', 'confidence', and 'classes'."
             )
