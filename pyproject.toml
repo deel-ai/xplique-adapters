@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=77"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Adapters and extension modules for Xplique, for model-specific explainability."
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
-license = "MIT"
+license = "MIT AND Apache-2.0 AND BSD-3-Clause AND AGPL-3.0-or-later"
 license-files = ["LICENSE", "LICENSES/*.txt", "LICENSES/README.md"]
 authors = [
   { name = "DEEL Core Team ", email = "agustin-martin.picard@irt-saintexupery.com" },
@@ -22,6 +22,8 @@ classifiers = [
 dependencies = [
   "xplique>=2.0.0",
   "numpy>=2,<3",
+  # Xplique currently allows SciPy versions that are too old for modern
+  # Python environments and may trigger an unsupported source build.
   "scipy>=1.14",
 ]
 
