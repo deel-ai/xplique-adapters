@@ -35,6 +35,8 @@ jobs:
 
           - python-version: "3.13"
             toxenv: py313-tf220
+          - python-version: "3.13"
+            toxenv: py313-package
 
     steps:
       - uses: actions/checkout@v6
