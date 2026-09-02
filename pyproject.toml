@@ -28,9 +28,11 @@ dependencies = [
 [project.optional-dependencies]
 tf = [
   "tensorflow>=2.18,<2.21",
+]
+retinanet = [
+  "xplique-adapters[tf]",
   "keras-cv>=0.9.0,<0.10",
 ]
-retinanet = ["xplique-adapters[tf]"]
 torch = [
   "xplique[torch]>=2.0.0",
   "torch>=2.5,<2.11",
@@ -47,7 +49,7 @@ yolo = [
   "xplique-adapters[torch]",
   "ultralytics>=8.4.120,<8.5",
 ]
-all = ["xplique-adapters[tf,torchvision,detr,yolo]"]
+all = ["xplique-adapters[retinanet,torchvision,detr,yolo]"]
 
 [dependency-groups]
 test = [
