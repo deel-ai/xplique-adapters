@@ -29,7 +29,7 @@ Install only the extras you need:
 | Extra | Installs | Use case |
 |---|---|---|
 | `yolo` | `ultralytics` | YOLO 11 / YOLO 2.6 models |
-| `detr` | `transformers` | DETR (HuggingFace) |
+| `detr` | `transformers>=5,<6` | DETR (HuggingFace) |
 | `torchvision` | `torchvision` | FCOS, RetinaNet, Faster R-CNN, SSD |
 | `retinanet` | `keras-cv` | TensorFlow RetinaNet |
 | `all` | all of the above | everything |
@@ -104,7 +104,7 @@ wrapper = YoloResultBoxesModelWrapper(model)
 | Class | Role | Details |
 |---|---|---|
 | `DetrBoxFormatter` | Formatter | DETR outputs CXCYWH normalized boxes + logits. The formatter softmaxes logits, extracts scores and converts boxes to XYXY absolute coordinates. Requires `image_size`. |
-| `DetrBoxesModelWrapper` | Wrapper | Wraps a HuggingFace DETR model with `DetrBoxFormatter`. |
+| `DetrBoxesModelWrapper` | Wrapper | Wraps Facebook reference or HuggingFace DETR models with `DetrBoxFormatter`. |
 
 **Usage:**
 
@@ -175,7 +175,7 @@ Each latent extractor pair consists of:
 | LatentData class | Builder class | Model family | Notes |
 |---|---|---|---|
 | `LatentDataYolo` | `YoloExtractorBuilder` | Ultralytics YOLO | Stores main activation `x` + list of skip-connection tensors `y` |
-| `LatentDataDetr` | `DetrExtractorBuilder` | HuggingFace DETR | Includes `NestedTensor` helper for variable-size inputs and masking |
+| `LatentDataDetr` | `DetrExtractorBuilder` | Facebook reference and HuggingFace DETR | Extracts the final backbone level and supports variable-size inputs and masking. HuggingFace latent extraction requires Transformers 5.x. |
 | `LatentDataRetinanet` | `RetinanetExtractorBuilder` | torchvision RetinaNet | Multi-scale FPN features as `OrderedDict`; `extraction_layer` selects which scale |
 | `LatentDataFasterRcnn` | `FasterRcnnExtractorBuilder` | torchvision Faster R-CNN | Multi-scale ResNet/FPN features; `extraction_layer` selects which scale |
 | `LatentDataFcos` | `FcosExtractorBuilder` | torchvision FCOS | Multi-scale FPN features; `extraction_layer` selects which scale |
