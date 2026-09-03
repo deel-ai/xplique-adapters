@@ -13,6 +13,7 @@ See https://github.com/facebookresearch/detr/blob/main/LICENSE.
 
 import types
 from collections.abc import Callable
+from importlib.metadata import PackageNotFoundError, version
 
 import numpy as np
 import torch
@@ -22,6 +23,24 @@ from xplique.concepts.latent_extractor import LatentData, LatentExtractorBuilder
 from xplique.concepts.torch.latent_extractor import TorchLatentExtractor
 
 from ...object_detection.torch import DetrBoxFormatter
+
+_FACEBOOK_ATTRIBUTES = (
+    "backbone",
+    "transformer",
+    "input_proj",
+    "query_embed",
+    "class_embed",
+    "bbox_embed",
+)
+_HUGGINGFACE_BASE_ATTRIBUTES = (
+    "backbone",
+    "position_embedding",
+    "input_projection",
+    "encoder",
+    "decoder",
+    "query_position_embeddings",
+)
+_HUGGINGFACE_HEAD_ATTRIBUTES = ("class_labels_classifier", "bbox_predictor")
 
 
 class NestedTensor:
@@ -106,9 +125,12 @@ class LatentDataDetr(LatentData):
     """
     Stores latent representations (features and positional encodings) from DETR's backbone.
 
-    This class encapsulates the multi-scale features and positional encodings extracted
-    from the DETR (Detection Transformer) backbone network. Features are stored as
-    NestedTensor objects to handle variable-sized inputs.
+    This class retains every feature level and positional encoding returned by a DETR
+    backbone. Features are stored as NestedTensor objects whose masks use ``True`` for
+    padding. Only the final backbone level is exposed as concept activations and passed
+    to the encoder-decoder, matching both Facebook and HuggingFace DETR forward paths.
+    Decoding arbitrary earlier levels is intentionally unsupported because the input
+    projection is constructed for the final level's channel count.
 
     Attributes
     ----------
@@ -116,16 +138,14 @@ class LatentDataDetr(LatentData):
         List of NestedTensor objects containing backbone feature maps at different scales.
     pos
         List of positional encoding tensors corresponding to each feature scale.
-    selected_index
-        Index of the feature level exposed as activations and consumed by the
-        DETR decoder. The final level is selected by default.
     """
+
+    BACKBONE_LEVEL_INDEX = -1
 
     def __init__(
         self,
         features: list,
         pos: list[torch.Tensor],
-        selected_index: int = -1,
     ):
         """
         Initialize DETR latent data with features and positional encodings.
@@ -136,12 +156,28 @@ class LatentDataDetr(LatentData):
             List of NestedTensor objects from the backbone.
         pos
             List of positional encoding tensors.
-        selected_index
-            Index of the selected feature level. Defaults to the final level.
         """
         self.features = features
         self.pos = pos
-        self.selected_index = selected_index
+
+    def selected_feature(self) -> NestedTensor:
+        """Return the final backbone feature consumed by DETR."""
+        return self.features[self.BACKBONE_LEVEL_INDEX]
+
+    def selected_position(self) -> torch.Tensor:
+        """Return the positional encoding for the final backbone feature."""
+        return self.pos[self.BACKBONE_LEVEL_INDEX]
+
+    def selected_padding_mask(self) -> torch.Tensor:
+        """Return the final feature's padding mask, or an empty padding mask."""
+        feature = self.selected_feature()
+        if feature.mask is not None:
+            return feature.mask
+        return torch.zeros(
+            (feature.tensors.shape[0], *feature.tensors.shape[-2:]),
+            dtype=torch.bool,
+            device=feature.tensors.device,
+        )
 
     def __len__(self) -> int:
         """
@@ -152,7 +188,7 @@ class LatentDataDetr(LatentData):
         batch_size
             Number of samples in the batch.
         """
-        return len(self.features[self.selected_index].tensors)
+        return len(self.selected_feature().tensors)
 
     def detach(self) -> None:
         """
@@ -183,7 +219,7 @@ class LatentDataDetr(LatentData):
         """
         new_features = [feature.to(device) for feature in self.features]
         new_pos = [position.to(device) for position in self.pos]
-        return LatentDataDetr(new_features, new_pos, self.selected_index)
+        return LatentDataDetr(new_features, new_pos)
 
     def get_activations(
         self, as_numpy: bool = True, keep_gradients: bool = False
@@ -204,7 +240,7 @@ class LatentDataDetr(LatentData):
             Feature tensors as numpy array or PyTorch tensor. If 4D (N, C, H, W),
             converted to (N, H, W, C) format for compatibility.
         """
-        activations = self.features[self.selected_index].tensors
+        activations = self.selected_feature().tensors
 
         if not keep_gradients:
             activations = activations.detach()
@@ -234,7 +270,8 @@ class LatentDataDetr(LatentData):
         if is_4d:
             values = values.permute(0, 3, 1, 2)
 
-        selected_feature = self.features[self.selected_index]
+        index = self.BACKBONE_LEVEL_INDEX
+        selected_feature = self.selected_feature()
         selected_feature.tensors = values
 
         # When a perturbation-based explainer batches multiple perturbed
@@ -249,11 +286,195 @@ class LatentDataDetr(LatentData):
             selected_feature.mask = selected_feature.mask[:1].repeat(
                 (new_batch_size,) + (1,) * (selected_feature.mask.ndim - 1)
             )
-        position = self.pos[self.selected_index]
+        position = self.selected_position()
         if position.shape[0] != new_batch_size:
-            self.pos[self.selected_index] = position[:1].repeat(
+            self.pos[index] = position[:1].repeat(
                 (new_batch_size,) + (1,) * (position.ndim - 1)
             )
+
+
+def _max_by_axis(shapes: list[list[int]]) -> list[int]:
+    maxes = shapes[0].copy()
+    for shape in shapes[1:]:
+        for index, item in enumerate(shape):
+            maxes[index] = max(maxes[index], item)
+    return maxes
+
+
+def _pad_images(
+    tensor_list: list[Tensor] | Tensor,
+    max_size: list[int] | tuple,
+) -> NestedTensor:
+    padded_images = []
+    padded_masks = []
+    for image in tensor_list:
+        padding = [maximum - current for maximum, current in zip(max_size, image.shape)]
+        padded_images.append(
+            torch.nn.functional.pad(
+                image, (0, padding[2], 0, padding[1], 0, padding[0])
+            )
+        )
+        valid_region = torch.zeros_like(image[0], dtype=torch.int, device=image.device)
+        padded_masks.append(
+            torch.nn.functional.pad(
+                valid_region, (0, padding[2], 0, padding[1]), "constant", 1
+            ).to(torch.bool)
+        )
+    return NestedTensor(torch.stack(padded_images), torch.stack(padded_masks))
+
+
+@torch.jit.unused
+def _onnx_nested_tensor_from_tensor_list(
+    tensor_list: list[Tensor] | Tensor,
+) -> NestedTensor:
+    max_size = []
+    for dimension in range(tensor_list[0].dim()):
+        maximum = torch.max(
+            torch.stack([image.shape[dimension] for image in tensor_list]).to(
+                torch.float32
+            )
+        ).to(torch.int64)
+        max_size.append(maximum)
+    return _pad_images(tensor_list, tuple(max_size))
+
+
+def _nested_tensor_from_tensor_list(
+    tensor_list: list[Tensor] | Tensor,
+) -> NestedTensor:
+    if len(tensor_list) == 0:
+        raise ValueError("DETR input must contain at least one image.")
+    if any(image.ndim != 3 for image in tensor_list):
+        raise ValueError("DETR expects images with shape (C, H, W) before batching.")
+    channels = tensor_list[0].shape[0]
+    if any(image.shape[0] != channels for image in tensor_list):
+        raise ValueError("All DETR images must have the same number of channels.")
+    if torchvision._is_tracing():
+        return _onnx_nested_tensor_from_tensor_list(tensor_list)
+    max_size = _max_by_axis([list(image.shape) for image in tensor_list])
+    return _pad_images(tensor_list, max_size)
+
+
+def _facebook_g(self, samples) -> LatentDataDetr:
+    if isinstance(samples, (list, torch.Tensor)):
+        samples = _nested_tensor_from_tensor_list(samples)
+    features, positions = self.backbone(samples)
+    return LatentDataDetr(features, positions)
+
+
+def _facebook_h(self, latent_data: LatentDataDetr):
+    source = latent_data.selected_feature().tensors
+    hidden_states = self.transformer(
+        self.input_proj(source),
+        latent_data.selected_padding_mask(),
+        self.query_embed.weight,
+        latent_data.selected_position(),
+    )[0]
+    outputs_class = self.class_embed(hidden_states)
+    outputs_coord = self.bbox_embed(hidden_states).sigmoid()
+    output = {
+        "pred_logits": outputs_class[-1],
+        "pred_boxes": outputs_coord[-1],
+    }
+    if self.aux_loss:
+        output["aux_outputs"] = self._set_aux_loss(outputs_class, outputs_coord)
+    return output
+
+
+def _huggingface_g(self, samples) -> LatentDataDetr:
+    nested_samples = _nested_tensor_from_tensor_list(samples)
+    pixel_values = nested_samples.tensors
+    valid_mask = nested_samples.mask.logical_not()
+    backbone_features = self.model.backbone(pixel_values, valid_mask)
+    features = [
+        NestedTensor(feature_map, feature_mask.logical_not())
+        for feature_map, feature_mask in backbone_features
+    ]
+    positions = [
+        self.model.position_embedding(
+            shape=feature.tensors.shape,
+            device=feature.tensors.device,
+            dtype=pixel_values.dtype,
+            mask=feature.mask.logical_not(),
+        )
+        for feature in features
+    ]
+    return LatentDataDetr(features, positions)
+
+
+def _huggingface_h(self, latent_data: LatentDataDetr):
+    feature_map = latent_data.selected_feature().tensors
+    valid_mask = latent_data.selected_padding_mask().logical_not()
+    flattened_features = (
+        self.model.input_projection(feature_map).flatten(2).transpose(1, 2)
+    )
+    spatial_positions = latent_data.selected_position().flatten(2).transpose(1, 2)
+    flattened_mask = valid_mask.flatten(1)
+    encoder_outputs = self.model.encoder(
+        inputs_embeds=flattened_features,
+        attention_mask=flattened_mask,
+        spatial_position_embeddings=spatial_positions,
+    )
+
+    query_positions = self.model.query_position_embeddings.weight.unsqueeze(0).repeat(
+        feature_map.shape[0], 1, 1
+    )
+    decoder_outputs = self.model.decoder(
+        inputs_embeds=torch.zeros_like(query_positions),
+        attention_mask=None,
+        spatial_position_embeddings=spatial_positions,
+        object_queries_position_embeddings=query_positions,
+        encoder_hidden_states=encoder_outputs.last_hidden_state,
+        encoder_attention_mask=flattened_mask,
+    )
+    sequence_output = decoder_outputs.last_hidden_state
+    return {
+        "logits": self.class_labels_classifier(sequence_output),
+        "pred_boxes": self.bbox_predictor(sequence_output).sigmoid(),
+    }
+
+
+def _missing_attributes(instance, attributes: tuple[str, ...]) -> list[str]:
+    return [name for name in attributes if getattr(instance, name, None) is None]
+
+
+def _is_facebook_detr(model) -> bool:
+    return not _missing_attributes(model, _FACEBOOK_ATTRIBUTES)
+
+
+def _is_huggingface_detr(model) -> bool:
+    return not _missing_huggingface_attributes(model)
+
+
+def _missing_huggingface_attributes(model) -> list[str]:
+    base_model = getattr(model, "model", None)
+    if base_model is None:
+        return ["model"]
+    missing = [
+        f"model.{name}"
+        for name in _missing_attributes(base_model, _HUGGINGFACE_BASE_ATTRIBUTES)
+    ]
+    missing.extend(_missing_attributes(model, _HUGGINGFACE_HEAD_ATTRIBUTES))
+    if getattr(getattr(model, "config", None), "model_type", None) != "detr":
+        missing.append("config.model_type='detr'")
+    return missing
+
+
+def _is_transformers_v4_detr(model) -> bool:
+    base_model = getattr(model, "model", None)
+    backbone = getattr(base_model, "backbone", None)
+    return (
+        base_model is not None
+        and getattr(backbone, "conv_encoder", None) is not None
+        and not _missing_attributes(model, _HUGGINGFACE_HEAD_ATTRIBUTES)
+        and getattr(getattr(model, "config", None), "model_type", None) == "detr"
+    )
+
+
+def _transformers_version() -> str:
+    try:
+        return version("transformers")
+    except PackageNotFoundError:
+        return "unknown"
 
 
 class DetrExtractorBuilder(LatentExtractorBuilder):
@@ -263,8 +484,8 @@ class DetrExtractorBuilder(LatentExtractorBuilder):
     This class provides methods to construct a TorchLatentExtractor specifically
     configured for DETR (Detection Transformer) object detection models. It defines
     the forward pass split into backbone feature extraction (g) and transformer-based
-    prediction (h). It is compatible with the caller-supplied Facebook DETR
-    reference model only; use DetrBoxesModelWrapper for HuggingFace DETR models.
+    prediction (h). Caller-supplied Facebook reference DETR models and HuggingFace
+    Transformers 5 ``DetrForObjectDetection`` models are supported.
     """
 
     @classmethod
@@ -285,8 +506,8 @@ class DetrExtractorBuilder(LatentExtractorBuilder):
         Parameters
         ----------
         model
-            PyTorch DETR model instance with backbone, transformer, input_proj,
-            query_embed, class_embed, and bbox_embed attributes.
+            Caller-supplied Facebook reference DETR model or HuggingFace
+            Transformers 5 ``DetrForObjectDetection`` model.
         device
             Device to run computations on ('cuda' or 'cpu'). Default is 'cuda'.
         batch_size
@@ -299,149 +520,41 @@ class DetrExtractorBuilder(LatentExtractorBuilder):
         latent_extractor
             Configured TorchLatentExtractor instance for the DETR model.
         """
-        required_attributes = (
-            "backbone",
-            "transformer",
-            "input_proj",
-            "query_embed",
-            "class_embed",
-            "bbox_embed",
-        )
-        missing_attributes = [
-            name for name in required_attributes if getattr(model, name, None) is None
-        ]
-        if missing_attributes:
-            missing = ", ".join(missing_attributes)
+        is_facebook = _is_facebook_detr(model)
+        is_huggingface = _is_huggingface_detr(model)
+        if not is_facebook and _is_transformers_v4_detr(model):
+            detected_version = _transformers_version()
             raise TypeError(
-                "DetrExtractorBuilder requires Facebook DETR attributes; "
-                f"missing: {missing}. DetrExtractorBuilder is "
-                "Facebook-reference-compatible only; use DetrBoxesModelWrapper "
-                "for HuggingFace models."
+                "DetrExtractorBuilder requires transformers>=5,<6 for HuggingFace "
+                f"DETR models; detected transformers {detected_version}."
             )
-        if getattr(model, "aux_loss", False) and not callable(
-            getattr(model, "_set_aux_loss", None)
+        if not is_facebook and not is_huggingface:
+            facebook_missing = ", ".join(
+                _missing_attributes(model, _FACEBOOK_ATTRIBUTES)
+            )
+            huggingface_missing = ", ".join(_missing_huggingface_attributes(model))
+            raise TypeError(
+                "DetrExtractorBuilder requires a Facebook reference DETR model "
+                f"(missing: {facebook_missing}) or a HuggingFace Transformers 5 "
+                "DetrForObjectDetection model "
+                f"(missing base-model attributes: {huggingface_missing})."
+            )
+        if (
+            is_facebook
+            and getattr(model, "aux_loss", False)
+            and not callable(getattr(model, "_set_aux_loss", None))
         ):
             raise TypeError(
                 "DetrExtractorBuilder requires callable model._set_aux_loss "
                 "when model.aux_loss is enabled."
             )
 
-        selected_index = -1
-
-        def nested_tensor_from_tensor_list(tensor_list: list[Tensor]):
-            # TODO make this more general
-            if tensor_list[0].ndim == 3:
-                if torchvision._is_tracing():
-                    # nested_tensor_from_tensor_list() does not export well to ONNX
-                    # call _onnx_nested_tensor_from_tensor_list() instead
-                    return _onnx_nested_tensor_from_tensor_list(tensor_list)
-
-                # TODO make it support different-sized images
-                max_size = _max_by_axis([list(img.shape) for img in tensor_list])
-                # min_size = tuple(min(s) for s in zip(*[img.shape for img in tensor_list]))
-                batch_shape = [len(tensor_list)] + max_size
-                b, _, h, w = batch_shape
-                dtype = tensor_list[0].dtype
-                device_tensor = tensor_list[0].device
-                tensor = torch.zeros(batch_shape, dtype=dtype, device=device_tensor)
-                mask = torch.ones((b, h, w), dtype=torch.bool, device=device_tensor)
-                # work around for
-                # pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
-                # m[: img.shape[1], :img.shape[2]] = False
-                # which is not yet supported in onnx
-                padded_imgs = []
-                padded_masks = []
-                for img in tensor_list:
-                    padding = [(s1 - s2) for s1, s2 in zip(max_size, tuple(img.shape))]
-                    padded_img = torch.nn.functional.pad(
-                        img, (0, padding[2], 0, padding[1], 0, padding[0])
-                    )
-                    padded_imgs.append(padded_img)
-
-                    m = torch.zeros_like(img[0], dtype=torch.int, device=img.device)
-                    padded_mask = torch.nn.functional.pad(
-                        m, (0, padding[2], 0, padding[1]), "constant", 1
-                    )
-                    padded_masks.append(padded_mask.to(torch.bool))
-
-                tensor = torch.stack(padded_imgs)
-                mask = torch.stack(padded_masks)
-            else:
-                raise ValueError("not supported")
-            return NestedTensor(tensor, mask)
-
-        def _max_by_axis(the_list):
-            # type: (List[List[int]]) -> List[int]
-            maxes = the_list[0]
-            for sublist in the_list[1:]:
-                for index, item in enumerate(sublist):
-                    maxes[index] = max(maxes[index], item)
-            return maxes
-
-        @torch.jit.unused
-        def _onnx_nested_tensor_from_tensor_list(
-            tensor_list: list[Tensor],
-        ) -> NestedTensor:
-            print("_onnx_nested_tensor_from_tensor_list")
-            max_size = []
-            for i in range(tensor_list[0].dim()):
-                max_size_i = torch.max(
-                    torch.stack([img.shape[i] for img in tensor_list]).to(torch.float32)
-                ).to(torch.int64)
-                max_size.append(max_size_i)
-            max_size = tuple(max_size)
-
-            # work around for
-            # pad_img[: img.shape[0], : img.shape[1], : img.shape[2]].copy_(img)
-            # m[: img.shape[1], :img.shape[2]] = False
-            # which is not yet supported in onnx
-            padded_imgs = []
-            padded_masks = []
-            for img in tensor_list:
-                padding = [(s1 - s2) for s1, s2 in zip(max_size, tuple(img.shape))]
-                padded_img = torch.nn.functional.pad(
-                    img, (0, padding[2], 0, padding[1], 0, padding[0])
-                )
-                padded_imgs.append(padded_img)
-
-                m = torch.zeros_like(img[0], dtype=torch.int, device=img.device)
-                padded_mask = torch.nn.functional.pad(
-                    m, (0, padding[2], 0, padding[1]), "constant", 1
-                )
-                padded_masks.append(padded_mask.to(torch.bool))
-
-            tensor = torch.stack(padded_imgs)
-            mask = torch.stack(padded_masks)
-
-            return NestedTensor(tensor, mask=mask)
-
-        def g(self, samples) -> LatentDataDetr:
-            if isinstance(samples, (list, torch.Tensor)):
-                samples = nested_tensor_from_tensor_list(samples)
-            features, pos = self.backbone(samples)
-
-            return LatentDataDetr(features, pos, selected_index=selected_index)
-
-        def h(self, latent_data: LatentDataDetr):
-            features, pos = latent_data.features, latent_data.pos
-
-            src, mask = features[selected_index].decompose()
-            if mask is None:
-                mask = torch.zeros(
-                    (src.shape[0], src.shape[-2], src.shape[-1]),
-                    dtype=torch.bool,
-                    device=src.device,
-                )
-            hs = self.transformer(
-                self.input_proj(src), mask, self.query_embed.weight, pos[selected_index]
-            )[0]
-
-            outputs_class = self.class_embed(hs)
-            outputs_coord = self.bbox_embed(hs).sigmoid()
-            out = {"pred_logits": outputs_class[-1], "pred_boxes": outputs_coord[-1]}
-            if self.aux_loss:
-                out["aux_outputs"] = self._set_aux_loss(outputs_class, outputs_coord)
-            return out
+        if is_facebook:
+            g = _facebook_g
+            h = _facebook_h
+        else:
+            g = _huggingface_g
+            h = _huggingface_h
 
         model.g = types.MethodType(g, model)
         model.h = types.MethodType(h, model)
