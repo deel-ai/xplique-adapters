@@ -34,6 +34,11 @@ Install only the extras you need:
 | `retinanet` | `keras-cv` | TensorFlow RetinaNet |
 | `all` | all of the above | everything |
 
+The Facebook reference DETR implementation is not installed as a package extra. Install
+the `torchvision` extra for its PyTorch dependencies, then load the upstream model through
+Torch Hub as shown below. The model source and checkpoint are downloaded into Torch's
+cache by the caller.
+
 ```bash
 pip install "xplique-adapters[yolo,torchvision] @ git+https://..."
 ```
@@ -99,21 +104,71 @@ wrapper = YoloResultBoxesModelWrapper(model)
 
 ---
 
-#### DETR (HuggingFace Transformers)
+#### DETR (Facebook reference and HuggingFace Transformers)
 
 | Class | Role | Details |
 |---|---|---|
 | `DetrBoxFormatter` | Formatter | DETR outputs CXCYWH normalized boxes + logits. The formatter softmaxes logits, extracts scores and converts boxes to XYXY absolute coordinates. Requires `image_size`. |
 | `DetrBoxesModelWrapper` | Wrapper | Wraps Facebook reference or HuggingFace DETR models with `DetrBoxFormatter`. |
+| `DetrExtractorBuilder` | Latent extractor | Splits a caller-supplied Facebook reference DETR or HuggingFace Transformers 5 DETR model for CRAFT. |
 
-**Usage:**
+##### Facebook reference DETR
+
+Install the PyTorch and Torchvision dependencies, then load the reference model through
+Torch Hub. `DetrExtractorBuilder` attaches the latent `g()` and `h()` split to the loaded
+model; it does not download or manage the model itself.
+
+```bash
+pip install "xplique-adapters[torchvision]"
+```
+
+```python
+import torch
+
+from xplique_adapters.concepts.torch.latent_data_detr import DetrExtractorBuilder
+from xplique_adapters.object_detection.torch import DetrBoxesModelWrapper
+
+model = torch.hub.load(
+    "facebookresearch/detr",
+    "detr_resnet50",
+    pretrained=True,
+).eval()
+
+# Use this wrapper for standard Xplique object-detection predictions.
+wrapper = DetrBoxesModelWrapper(model, image_size=(800, 800))
+
+# Use this extractor when running CRAFT or another latent-space method.
+latent_extractor = DetrExtractorBuilder.build(
+    model,
+    device="cuda",
+    image_size=(800, 800),
+)
+```
+
+The complete CRAFT example is available in
+[`examples/torch_detr_craft.py`](examples/torch_detr_craft.py).
+
+##### HuggingFace Transformers DETR
+
+Install the `detr` extra, which provides `transformers>=5,<6`:
+
+```bash
+pip install "xplique-adapters[detr]"
+```
 
 ```python
 from transformers import DetrForObjectDetection
+
+from xplique_adapters.concepts.torch.latent_data_detr import DetrExtractorBuilder
 from xplique_adapters.object_detection.torch import DetrBoxesModelWrapper
 
-model = DetrForObjectDetection.from_pretrained("facebook/detr-resnet-50")
+model = DetrForObjectDetection.from_pretrained("facebook/detr-resnet-50").eval()
 wrapper = DetrBoxesModelWrapper(model, image_size=(640, 640))
+latent_extractor = DetrExtractorBuilder.build(
+    model,
+    device="cuda",
+    image_size=(640, 640),
+)
 ```
 
 ---
@@ -175,7 +230,7 @@ Each latent extractor pair consists of:
 | LatentData class | Builder class | Model family | Notes |
 |---|---|---|---|
 | `LatentDataYolo` | `YoloExtractorBuilder` | Ultralytics YOLO | Stores main activation `x` + list of skip-connection tensors `y` |
-| `LatentDataDetr` | `DetrExtractorBuilder` | Facebook reference and HuggingFace DETR | Extracts the final backbone level and supports variable-size inputs and masking. HuggingFace latent extraction requires Transformers 5.x. |
+| `LatentDataDetr` | `DetrExtractorBuilder` | Facebook reference and HuggingFace Transformers 5 DETR | Extracts the final backbone level and supports variable-size inputs and masking. Facebook models are caller-supplied, typically through Torch Hub. |
 | `LatentDataRetinanet` | `RetinanetExtractorBuilder` | torchvision RetinaNet | Multi-scale FPN features as `OrderedDict`; `extraction_layer` selects which scale |
 | `LatentDataFasterRcnn` | `FasterRcnnExtractorBuilder` | torchvision Faster R-CNN | Multi-scale ResNet/FPN features; `extraction_layer` selects which scale |
 | `LatentDataFcos` | `FcosExtractorBuilder` | torchvision FCOS | Multi-scale FPN features; `extraction_layer` selects which scale |
