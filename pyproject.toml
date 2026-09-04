@@ -1,73 +1,144 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "xplique-adapters"
 version = "0.1.0"
 description = "Adapters and extension modules for Xplique, for model-specific explainability."
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
-license = { file = "LICENSE" }
+license = "MIT AND Apache-2.0 AND BSD-3-Clause AND AGPL-3.0-or-later"
+license-files = ["LICENSE", "LICENSES/*.txt", "LICENSES/README.md"]
 authors = [
-  { name = "DEEL Core Team ", email = "agustin-martin.picard@irt-saintexupery.com"}
+  { name = "DEEL Core Team ", email = "agustin-martin.picard@irt-saintexupery.com" },
 ]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Programming Language :: Python",
   "Programming Language :: Python :: 3",
-  "Operating System :: OS Independent"
+  "Operating System :: OS Independent",
 ]
 dependencies = [
   "xplique>=2.0.0",
-  "keras-cv",
-  "deprecated>=1.1.0",
-  "einops>=0.1.0",
-  "matplotlib>=1.4.3",
-  "numpy>=2.0.0",
-  "opencv-python>=3.4.11.39",
-  "ruff>=0.15.0",
-  "scikit-image>=0.14.1,<=0.25.2",
-  "scikit-learn>=0.14.1,<=1.7.2",
-  "scipy>=1.0.0,<=1.15.3",
-  "tensorflow[and-cuda]>=2.16.1,<=2.20.0",
-  "tensorflow-probability[tf]>=0.20.1,<=0.25.0",
+  "numpy>=2,<3",
+  # Xplique currently allows SciPy versions that are too old for modern
+  # Python environments and may trigger an unsupported source build.
+  "scipy>=1.14",
 ]
 
-[dependency-groups]
-dev = [
-    "bump2version",
-    "docutils",
-    "markdown",
-    "mkdocs",
-    "mkdocs-material",
-    "mypy",
-    "mypy-extensions",
-    "numkdoc",
-    "pre-commit",
-    "pygments",
-    "ruff",
-    "pymdown-extensions",
-    "pytest",
-    "pytest-cov",
-    "tox",
-    "tox-uv",
+[project.optional-dependencies]
+tf = [
+  "tensorflow>=2.18,<2.21",
+]
+retinanet = [
+  "xplique-adapters[tf]",
+  "keras-cv>=0.9.0,<0.10",
 ]
 torch = [
-  "torch>=2.5.0,<=2.10.0",
-  "torchvision>=0.23.0",
+  "xplique[torch]>=2.0.0",
+  "torch>=2.5,<2.11",
+]
+torchvision = [
+  "xplique-adapters[torch]",
+  "torchvision",
+]
+detr = [
+  "xplique-adapters[torchvision]",
+  "transformers",
 ]
 yolo = [
-  "ultralytics",
-  "overcomplete>=0.2.8",
+  "xplique-adapters[torch]",
+  "ultralytics>=8.4.120,<8.5",
+]
+all = ["xplique-adapters[retinanet,torchvision,detr,yolo]"]
+
+[dependency-groups]
+test = [
+  "pytest",
+  "pytest-cov",
+]
+lint = [
+  "ruff",
+]
+docs = [
+  "docutils",
+  "markdown",
+  "mkdocs",
+  "mkdocs-material",
+  "numkdoc",
+  "pygments",
+  "pymdown-extensions",
+]
+build = [
+  "build",
+  "bump-my-version>=0.33.0",
+  "check-wheel-contents",
+  "twine",
+]
+dev = [
+  { include-group = "test" },
+  { include-group = "lint" },
+  { include-group = "docs" },
+  { include-group = "build" },
+  "mypy",
+  "mypy-extensions",
+  "pre-commit",
+  "tox",
+  "tox-uv",
 ]
 
 [tool.setuptools.packages.find]
 include = ["xplique_adapters*"]
+exclude = ["tests*", "examples*", "build*", "dist*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = ["-v", "--tb=short", "--strict-markers"]
+markers = [
+  "detr: tests requiring DETR model (transformers library)",
+  "retinanet: tests requiring RetinaNet model (keras_cv library)",
+  "yolo: tests requiring YOLO model (ultralytics library)",
+  "torchvision: tests requiring torchvision models",
+  "cuda: tests requiring CUDA/GPU",
+  "slow: slow-running integration tests",
+]
+norecursedirs = [
+  ".git",
+  ".tox",
+  "dist",
+  "build",
+  "*.egg",
+  "xplique_adapters.egg-info",
+]
+
+[tool.coverage.run]
+source = ["xplique_adapters"]
+omit = ["*/tests/*", "*/test_*.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "def __repr__",
+  "raise AssertionError",
+  "raise NotImplementedError",
+  "if __name__ == .__main__.",
+  "if TYPE_CHECKING:",
+  "@abstractmethod",
+]
+
+[tool.mypy]
+check_untyped_defs = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["numpy.*", "sklearn.*"]
+ignore_missing_imports = true
 
 [tool.bumpversion]
-current_version = "0.1.0"
 commit = true
 tag = false
-
-[[tool.bumpversion.files]]
-filename = "pyproject.toml"
-
-[[tool.bumpversion.files]]
-filename = "xplique_adapters/__init__.py"
+allow_dirty = false
