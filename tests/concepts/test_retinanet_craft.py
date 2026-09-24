@@ -19,6 +19,7 @@ from xplique.utils_functions.object_detection.tf.multi_box_tensor import (
 )
 
 from xplique_adapters.concepts.tf.latent_data_retinanet import RetinaNetExtractorBuilder
+from xplique_adapters.object_detection.tf import RetinaNetBoxesModelWrapper
 
 pp = pprint.PrettyPrinter(indent=4)
 print(tf.__version__)
@@ -80,6 +81,33 @@ def test_model_outputs(model_data):
         "classes",
         "num_detections",
     ]
+
+
+def test_retinanet_wrapper_real_raw_and_decoded_paths(image_data, model_data):
+    _image, input_tensor = image_data
+    model, _processed_results = model_data
+    image_size = tuple(input_tensor.shape[1:3])
+
+    raw_wrapper = RetinaNetBoxesModelWrapper(model, nb_classes=20, image_size=image_size)
+    raw_results = raw_wrapper(input_tensor)
+
+    class DecodedModel:
+        bounding_box_format = model.bounding_box_format
+        prediction_decoder = model.prediction_decoder
+
+        def __call__(self, images, **kwargs):
+            return model.decode_predictions(model(images, training=False), images)
+
+    decoded_wrapper = RetinaNetBoxesModelWrapper(
+        DecodedModel(),
+        nb_classes=20,
+        image_size=image_size,
+        prediction_mode="decoded",
+    )
+    decoded_results = decoded_wrapper(input_tensor)
+
+    assert len(raw_results) == len(decoded_results) == 1
+    assert raw_results[0].shape[-1] == decoded_results[0].shape[-1] == 25
 
 
 def test_gradients_predict(image_data, model_data):
