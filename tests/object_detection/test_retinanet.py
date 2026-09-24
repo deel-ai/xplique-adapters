@@ -81,6 +81,45 @@ def test_retinanet_formatter_requires_dimensions_for_pixel_conversion():
         RetinaNetProcessedBoxFormatter(2)(_decoded_predictions(num_boxes=1))
 
 
+def test_retinanet_formatter_forward_accepts_tensor_dimensions_without_mutation():
+    formatter = RetinaNetProcessedBoxFormatter._from_box_types(
+        1,
+        input_box_type=BoxType(BoxFormat.XYWH, is_normalized=True),
+        output_box_type=BoxType(BoxFormat.XYXY, is_normalized=False),
+    )
+    predictions = {
+        "boxes": tf.constant([[[0.1, 0.2, 0.5, 0.6]]]),
+        "confidence": tf.ones((1, 1)),
+        "classes": tf.zeros((1, 1), dtype=tf.int32),
+    }
+
+    result = formatter.forward(
+        predictions, image_size=(tf.constant(100), tf.constant(200))
+    )[0]
+
+    np.testing.assert_allclose(result.boxes().numpy(), [[20.0, 20.0, 120.0, 80.0]])
+    assert formatter.image_size is None
+    with pytest.raises(ValueError, match="image_size"):
+        formatter(predictions)
+
+
+def test_retinanet_latent_formatter_keeps_normalized_boxes_without_dimensions():
+    formatter = RetinaNetProcessedBoxFormatter._from_box_types(
+        1,
+        input_box_type=BoxType(BoxFormat.XYXY, is_normalized=True),
+        output_box_type=BoxType(BoxFormat.XYXY, is_normalized=True),
+    )
+    predictions = {
+        "boxes": tf.constant([[[0.1, 0.2, 0.6, 0.8]]]),
+        "confidence": tf.ones((1, 1)),
+        "classes": tf.zeros((1, 1), dtype=tf.int32),
+    }
+
+    result = formatter(predictions)[0]
+
+    np.testing.assert_allclose(result.boxes().numpy(), [[0.1, 0.2, 0.6, 0.8]])
+
+
 def test_retinanet_wrapper_decoded_mode_forwards_kwargs():
     calls = []
 
@@ -193,13 +232,20 @@ def test_retinanet_wrapper_requires_explicit_box_type_without_metadata():
         wrapper(tf.zeros((1, 100, 200, 3)))
 
 
-def test_retinanet_wrapper_relative_boxes_do_not_require_image_size():
+@pytest.mark.parametrize(
+    ("box_format", "boxes"),
+    [
+        ("rel_xyxy", [0.1, 0.2, 0.6, 0.8]),
+        ("rel_xywh", [0.1, 0.2, 0.5, 0.6]),
+    ],
+)
+def test_retinanet_wrapper_relative_boxes_do_not_require_image_size(box_format, boxes):
     class RelativeModel:
-        bounding_box_format = "rel_xyxy"
+        bounding_box_format = box_format
 
         def __call__(self, x):
             return {
-                "boxes": tf.constant([[[0.1, 0.2, 0.6, 0.8]]]),
+                "boxes": tf.constant([[boxes]]),
                 "confidence": tf.ones((1, 1)),
                 "classes": tf.zeros((1, 1), dtype=tf.int32),
             }
@@ -212,7 +258,72 @@ def test_retinanet_wrapper_relative_boxes_do_not_require_image_size():
 
     result = wrapper(tf.zeros((1, 100, 200, 3)))[0]
 
-    np.testing.assert_allclose(result.boxes().numpy(), [[0.1, 0.2, 0.6, 0.8]])
+    np.testing.assert_allclose(result.boxes().numpy(), [[20.0, 20.0, 120.0, 80.0]])
+    smaller_result = wrapper(tf.zeros((1, 80, 120, 3)))[0]
+    np.testing.assert_allclose(
+        smaller_result.boxes().numpy(), [[12.0, 16.0, 72.0, 64.0]]
+    )
+    assert wrapper.box_formatter.image_size is None
+
+    wrapper.output_as_list = False
+    padded_result = wrapper(tf.zeros((1, 100, 200, 3)))
+    np.testing.assert_allclose(
+        padded_result.numpy()[0, 0, :4], [20.0, 20.0, 120.0, 80.0]
+    )
+    assert wrapper.box_formatter.image_size is None
+
+
+def test_retinanet_wrapper_relative_boxes_use_configured_image_size():
+    class RelativeModel:
+        bounding_box_format = "rel_xywh"
+
+        def __call__(self, x):
+            return {
+                "boxes": tf.constant([[[0.1, 0.2, 0.5, 0.6]]]),
+                "confidence": tf.ones((1, 1)),
+                "classes": tf.zeros((1, 1), dtype=tf.int32),
+            }
+
+    wrapper = RetinaNetBoxesModelWrapper(
+        RelativeModel(), 1, image_size=(100, 200), prediction_mode="decoded"
+    )
+
+    result = wrapper(tf.zeros((1, 80, 120, 3)))[0]
+
+    np.testing.assert_allclose(result.boxes().numpy(), [[20.0, 20.0, 120.0, 80.0]])
+    assert wrapper.box_formatter.image_size == (100, 200)
+
+
+def test_retinanet_wrapper_relative_box_coordinates_preserve_gradient():
+    class RelativeModel:
+        bounding_box_format = "rel_xywh"
+
+        def __call__(self, x):
+            base = tf.reshape(x[:, 0, 0, 0], (-1, 1, 1))
+            boxes = tf.concat(
+                [
+                    0.1 + 0.01 * base,
+                    tf.ones_like(base) * 0.2,
+                    tf.ones_like(base) * 0.5,
+                    tf.ones_like(base) * 0.6,
+                ],
+                axis=-1,
+            )
+            return {
+                "boxes": boxes,
+                "confidence": tf.ones((tf.shape(x)[0], 1)),
+                "classes": tf.zeros((tf.shape(x)[0], 1), dtype=tf.int32),
+            }
+
+    wrapper = RetinaNetBoxesModelWrapper(RelativeModel(), 1, prediction_mode="decoded")
+    inputs = tf.Variable(tf.ones((1, 100, 200, 1)))
+
+    with tf.GradientTape() as tape:
+        x_min = wrapper(inputs)[0].boxes()[0, 0]
+    gradient = tape.gradient(x_min, inputs)
+
+    assert gradient is not None
+    np.testing.assert_allclose(gradient.numpy()[0, 0, 0, 0], 2.0, rtol=1e-6)
 
 
 def test_retinanet_wrapper_rejects_non_mapping_decoded_predictions():

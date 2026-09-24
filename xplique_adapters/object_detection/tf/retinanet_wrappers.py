@@ -39,7 +39,9 @@ class RetinaNetBoxesModelWrapper(TfBoxesModelWrapper):
     ``model.prediction_decoder.bounding_box_format``, and finally the explicit
     ``input_box_type`` argument. Supported formats are ``xyxy``, ``xywh``,
     ``center_xywh``, ``rel_xyxy``, and ``rel_xywh``. Axis orders such as
-    ``yxyx`` are rejected rather than guessed.
+    ``yxyx`` are rejected rather than guessed. Output boxes are absolute
+    ``xyxy``. Relative sources use the input dimensions when ``image_size``
+    is omitted; a configured size takes precedence.
     """
 
     def __init__(
@@ -60,8 +62,10 @@ class RetinaNetBoxesModelWrapper(TfBoxesModelWrapper):
         nb_classes
             Number of foreground classes represented by the model.
         image_size
-            Input image dimensions as ``(height, width)``. Required when the
-            decoded boxes are absolute coordinates and must be normalized.
+            Input image dimensions as ``(height, width)``. Required for
+            absolute decoded boxes; relative boxes use the input tensor's
+            dimensions when no size is provided. An explicit size takes
+            precedence over the input dimensions.
         prediction_mode
             ``"raw"`` to invoke ``decode_predictions`` after the model call,
             or ``"decoded"`` when the callable already returns decoded fields.
@@ -269,7 +273,12 @@ class RetinaNetBoxesModelWrapper(TfBoxesModelWrapper):
             predictions = self.model(x, **call_kwargs)
 
         predictions = self._canonicalize_predictions(predictions, x)
-        list_of_predictions = self.box_formatter(predictions)
+        image_size = self.box_formatter.image_size
+        if image_size is None and self.box_formatter.input_box_type.is_normalized:
+            image_size = (tf.shape(x)[1], tf.shape(x)[2])
+        list_of_predictions = self.box_formatter.forward(
+            predictions, image_size=image_size
+        )
         if self.output_as_list:
             return list_of_predictions
         return _pad_and_stack_box_predictions(list_of_predictions)

@@ -9,21 +9,25 @@ from xplique.utils_functions.object_detection.tf.multi_box_tensor import (
     TfMultiBoxTensor,
 )
 
+ImageSize = tuple[int | tf.Tensor, int | tf.Tensor]
+
 
 class RetinaNetProcessedBoxFormatter(TfBaseBoxFormatter):
     """Format a batch of decoded KerasCV RetinaNet predictions.
 
     ``predictions`` must be a mapping whose values have a batch dimension:
-    ``boxes`` has shape ``(B, N, 4)`` in absolute ``xywh`` format,
+    ``boxes`` has shape ``(B, N, 4)`` (absolute ``xywh`` by default),
     ``confidence`` and ``classes`` have shape ``(B, N)``, and ``num_detections``
     may provide the valid count for each image. KerasCV's optional ``scores``
     field is accepted as per-class probabilities with shape ``(B, N, C)``.
 
-    The formatter returns one :class:`TfMultiBoxTensor` per image. The public
-    image-size convention is ``(height, width)``; Xplique receives ``(width,
-    height)`` internally. When ``num_detections`` is present, rows after the
-    valid count are treated as padding and are not returned. Rows with class
-    ``-1`` are likewise padding and are never passed to ``tf.one_hot``.
+    The default output is absolute ``xyxy``; the latent extractor configures
+    normalized input and output types separately. The formatter returns one
+    :class:`TfMultiBoxTensor` per image. The public image-size convention is
+    ``(height, width)``; Xplique receives ``(width, height)`` internally.
+    When ``num_detections`` is present, rows after the valid count are treated
+    as padding and are not returned. Rows with class ``-1`` are likewise
+    padding and are never passed to ``tf.one_hot``.
     """
 
     def __init__(
@@ -42,8 +46,8 @@ class RetinaNetProcessedBoxFormatter(TfBaseBoxFormatter):
             Number of foreground classes represented by the model.
         image_size
             Input image dimensions as ``(height, width)``. Required when
-            converting the formatter's absolute input boxes to normalized
-            output boxes.
+            formatting absolute boxes; Xplique uses them to translate from
+            ``xywh`` to absolute ``xyxy``.
 
         Raises
         ------
@@ -104,22 +108,25 @@ class RetinaNetProcessedBoxFormatter(TfBaseBoxFormatter):
             _output_box_type=output_box_type,
         )
 
-    def _xplique_image_size(self) -> tuple[int, int] | None:
+    @staticmethod
+    def _xplique_image_size(
+        image_size: ImageSize | None,
+    ) -> ImageSize | None:
         """Return the public image size in Xplique's ``(width, height)`` order."""
-        if self.image_size is None:
+        if image_size is None:
             return None
-        height, width = self.image_size
+        height, width = image_size
         return width, height
 
-    def _validate_image_size(self) -> None:
+    def _validate_image_size(self, image_size: ImageSize | None) -> None:
         """Validate dimensions before translating absolute coordinates."""
-        if self.image_size is None and (
+        if image_size is None and (
             not self.input_box_type.is_normalized
             or not self.output_box_type.is_normalized
         ):
             raise ValueError(
-                "image_size is required to convert between absolute and "
-                "normalized RetinaNet boxes."
+                "image_size is required to format RetinaNet boxes with "
+                "absolute coordinates."
             )
 
     @staticmethod
@@ -184,7 +191,9 @@ class RetinaNetProcessedBoxFormatter(TfBaseBoxFormatter):
                 "RetinaNet 'num_detections' must have one value per image."
             )
 
-    def forward(self, predictions) -> list[TfMultiBoxTensor]:
+    def forward(
+        self, predictions, *, image_size: ImageSize | None = None
+    ) -> list[TfMultiBoxTensor]:
         """Format one decoded result per image in a batched prediction mapping.
 
         Parameters
@@ -194,6 +203,10 @@ class RetinaNetProcessedBoxFormatter(TfBaseBoxFormatter):
             ``confidence`` and ``classes`` with shape ``(B, N)``, and optional
             ``scores`` with shape ``(B, N, nb_classes)``. ``num_detections``
             may provide one valid row count per image.
+        image_size
+            Per-call ``(height, width)`` dimensions, overriding the configured
+            size without changing formatter state. Required when either box
+            type uses absolute coordinates and no size was configured.
 
         Returns
         -------
@@ -207,6 +220,7 @@ class RetinaNetProcessedBoxFormatter(TfBaseBoxFormatter):
             If required fields are missing, fields have incompatible shapes,
             class IDs are invalid, or image dimensions are required but absent.
         """
+        effective_image_size = self.image_size if image_size is None else image_size
         if not isinstance(predictions, Mapping):
             raise TypeError(
                 "RetinaNet predictions must be a mapping containing "
@@ -241,7 +255,7 @@ class RetinaNetProcessedBoxFormatter(TfBaseBoxFormatter):
             num_detections,
             self.nb_classes,
         )
-        self._validate_image_size()
+        self._validate_image_size(effective_image_size)
 
         batch_size = boxes.shape[0]
         if batch_size is None:
@@ -251,7 +265,7 @@ class RetinaNetProcessedBoxFormatter(TfBaseBoxFormatter):
             )
 
         results = []
-        image_size = self._xplique_image_size()
+        xplique_image_size = self._xplique_image_size(effective_image_size)
         for batch_idx in range(batch_size):
             item_boxes = boxes[batch_idx]
             item_confidence = confidence[batch_idx]
@@ -317,7 +331,7 @@ class RetinaNetProcessedBoxFormatter(TfBaseBoxFormatter):
                         "scores": item_confidence[:, tf.newaxis],
                         "probas": probas,
                     },
-                    image_size=image_size,
+                    image_size=xplique_image_size,
                 )
             )
         return results
