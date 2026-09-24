@@ -45,7 +45,7 @@ torchvision = [
 ]
 detr = [
   "xplique-adapters[torchvision]",
-  "transformers",
+  "transformers>=5,<6",
 ]
 yolo = [
   "xplique-adapters[torch]",
