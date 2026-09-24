@@ -95,8 +95,8 @@ Three formatters cover the two main YOLO output modes:
 | Class | Input format | When to use |
 |---|---|---|
 | `YoloResultBoxFormatter` | Ultralytics `Results` objects (XYXY, absolute px) | Default YOLO inference — `model(images)` returns `Results` |
-| `YoloOneToManyFormatter` | Raw tuple `(tensor, aux)`, CXCYWH normalized | YOLO 11 internal raw output (before post-processing) |
-| `YoloOneToOneFormatter` | Raw tuple `(tensor, aux)`, XYXY normalized | YOLO 26 internal raw output (before post-processing) |
+| `YoloOneToManyFormatter` | Inference tuple `(tensor, aux)`, CXCYWH in input-image pixels | YOLO 11 decoded detections before Results/NMS |
+| `YoloOneToOneFormatter` | Inference tuple `(tensor, aux)`, XYXY in input-image pixels | YOLO 26 decoded, top-k detections before Results |
 
 Corresponding wrappers:
 
