@@ -216,7 +216,7 @@ wrapper = TorchvisionBoxesModelWrapper(model, nb_classes=91)  # COCO
 
 | Class | Role | Details |
 |---|---|---|
-| `RetinaNetProcessedBoxFormatter` | Formatter | Formats decoded batched predictions (`boxes[B,N,4]`, `confidence[B,N]`, `classes[B,N]`, optional `num_detections[B]` and per-class `scores[B,N,C]`). Uses absolute `xywh` input and normalized `xyxy` output. |
+| `RetinaNetProcessedBoxFormatter` | Formatter | Formats decoded batched predictions (`boxes[B,N,4]`, `confidence[B,N]`, `classes[B,N]`, optional `num_detections[B]` and per-class `scores[B,N,C]`). Uses absolute `xywh` input and absolute `xyxy` output. |
 | `RetinaNetBoxesModelWrapper` | Wrapper | Wraps a KerasCV RetinaNet in `prediction_mode="raw"` (default, calls `decode_predictions`) or explicit `prediction_mode="decoded"`. |
 
 RetinaNet public image sizes use `(height, width)`. Padding rows are removed
@@ -225,8 +225,10 @@ and class `-1` rows are treated as padding. The wrapper infers KerasCV's
 `bounding_box_format` from the model and supports
 `xyxy`, `xywh`, `center_xywh`, `rel_xyxy`, and `rel_xywh` formats.
 Decoded callables without either format attribute must pass an explicit
-`input_box_type`; normalized `rel_` formats do not require `image_size`, while
-absolute formats do.
+`input_box_type`. The wrapper derives the image dimensions from its input for
+relative `rel_` formats when `image_size` is omitted; absolute formats require
+an explicit `image_size`. An explicit size takes precedence over input
+dimensions; output boxes are always absolute `xyxy`.
 
 **Usage:**
 
