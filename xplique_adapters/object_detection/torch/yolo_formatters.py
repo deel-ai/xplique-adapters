@@ -85,17 +85,20 @@ class YoloResultBoxFormatter(TorchBaseBoxFormatter):
 
 class YoloOneToManyFormatter(TorchBaseBoxFormatter):
     """
-    Box formatter for raw YOLO model outputs (tensor format).
+    Box formatter for YOLO one-to-many inference tuples.
 
-    Processes raw YOLO predictions in CXCYWH normalized format before they are
-    converted to Results objects. Handles tuple output with detection tensors.
+    Converts decoded CXCYWH boxes in input-image pixels to XYXY pixels from
+    inference tuples rather than Ultralytics Results objects.
     """
 
     def __init__(self) -> None:
         """
-        Initialize raw YOLO formatter with CXCYWH normalized input format.
+        Initialize YOLO formatter with absolute CXCYWH input and XYXY output.
         """
-        super().__init__(input_box_type=BoxType(BoxFormat.CXCYWH, is_normalized=True))
+        super().__init__(
+            input_box_type=BoxType(BoxFormat.CXCYWH, is_normalized=False),
+            output_box_type=BoxType(BoxFormat.XYXY, is_normalized=False),
+        )
 
     def forward(self, predictions: torch.Tensor) -> list[TorchMultiBoxTensor]:
         """
@@ -105,8 +108,10 @@ class YoloOneToManyFormatter(TorchBaseBoxFormatter):
         ----------
         predictions
             Tuple containing (detection_tensor, auxiliary_data) where
-            detection_tensor has shape (batch, features, num_boxes) with features
-            encoding boxes (4 values) and class probabilities.
+            detection_tensor has shape (batch, 4 + classes, num_boxes) (or
+            batch, 1, 4 + classes, num_boxes). The first four values are
+            decoded CXCYWH coordinates in input-image pixels, followed by
+            class probabilities.
 
         Returns
         -------
@@ -153,30 +158,38 @@ class YoloOneToManyFormatter(TorchBaseBoxFormatter):
         formatted_preds = []
         for i in range(nb_preds):
             pred = predictions[0][i]
-            boxes = pred.squeeze().permute(1, 0)[:, :4]
-            probas = pred.squeeze().permute(1, 0)[:, 4:]  # sigmoid result
+            if pred.ndim == 3:
+                pred = pred.squeeze(0)  # optional singleton axis, not num_boxes
+            pred = pred.permute(1, 0)
+            centers = pred[:, :2]
+            half_sizes = pred[:, 2:4] / 2
+            boxes = torch.cat((centers - half_sizes, centers + half_sizes), dim=1)
+            probas = pred[:, 4:]  # sigmoid result
             scores = probas.max(-1).values.unsqueeze(1)
-            pred_dict = {"boxes": boxes, "scores": scores, "probas": probas}
-            formatted = self.format_predictions(
-                pred_dict
-            )  # needs boxes, scores, probas
-            formatted_preds.append(formatted)
+            # Xplique's absolute-coordinate translator requires image_size even
+            # for this scale-independent CXCYWH-to-XYXY conversion.
+            formatted_preds.append(
+                TorchMultiBoxTensor(torch.cat((boxes, scores, probas), dim=1))
+            )
         return formatted_preds
 
 
 class YoloOneToOneFormatter(TorchBaseBoxFormatter):
     """
-    Box formatter for raw YOLO model outputs (tensor format).
+    Box formatter for YOLO end-to-end inference tuples.
 
-    Processes raw YOLO predictions in XYXY normalized format before they are
-    converted to Results objects. Handles tuple output with detection tensors.
+    Processes top-k detections with XYXY boxes in input-image pixels from
+    inference tuples rather than Ultralytics Results objects.
     """
 
     def __init__(self, nb_classes: int) -> None:
         """
-        Initialize raw YOLO formatter with XYXY normalized input format.
+        Initialize YOLO formatter with absolute XYXY input and output.
         """
-        super().__init__(input_box_type=BoxType(BoxFormat.XYXY, is_normalized=True))
+        super().__init__(
+            input_box_type=BoxType(BoxFormat.XYXY, is_normalized=False),
+            output_box_type=BoxType(BoxFormat.XYXY, is_normalized=False),
+        )
         self.nb_classes = nb_classes
 
     def forward(self, predictions: torch.Tensor) -> list[TorchMultiBoxTensor]:
@@ -187,8 +200,8 @@ class YoloOneToOneFormatter(TorchBaseBoxFormatter):
         ----------
         predictions
             Tuple containing (detection_tensor, auxiliary_data) where
-            detection_tensor has shape (batch, features, num_boxes) with features
-            encoding boxes (4 values) and class probabilities.
+            detection_tensor has shape (batch, num_boxes, 6), with absolute
+            XYXY coordinates, score, and class ID per detection.
 
         Returns
         -------
@@ -224,9 +237,9 @@ class YoloOneToOneFormatter(TorchBaseBoxFormatter):
         formatted_preds = []
         for i in range(nb_preds):
             pred = predictions[0][i]
-            boxes = pred.squeeze()[:, :4]
-            scores = pred.squeeze()[:, 4].unsqueeze(1)
-            class_id = pred.squeeze()[:, 5]
+            boxes = pred[:, :4]
+            scores = pred[:, 4].unsqueeze(1)
+            class_id = pred[:, 5]
             # transform the class_id into a one-hot encoding
             probas = torch.zeros((scores.shape[0], self.nb_classes), device=pred.device)
             probas[torch.arange(scores.shape[0]), class_id.long()] = 1
