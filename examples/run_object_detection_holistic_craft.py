@@ -282,7 +282,6 @@ def load_model(model_name, config, device, framework="torch"):
     if model_name in ["yolo11", "yolo26"]:
         from ultralytics import YOLO
         model = YOLO(config["model_path"]).to(device)
-        model.eval()
         return model
 
 # pylint: disable=too-many-return-statements,inconsistent-return-statements,import-outside-toplevel
@@ -349,7 +348,13 @@ def build_latent_extractor(model_name, model, config, device, framework="torch",
         )
 
         detection_model = model.model
-        nb_classes = len(COCO_CLASSES)
+        # Ultralytics COCO heads use contiguous class IDs; do not use the
+        # sparse torchvision-style COCO_CLASSES table here.
+        nb_classes = len(model.names)
+        head_nc = detection_model.model[-1].nc
+        assert head_nc == nb_classes, (
+            f"YOLO class count mismatch: head nc={head_nc}, names={nb_classes}"
+        )
         mode = (
             YoloExtractorMode.ONE_TO_ONE
             if model_name == "yolo26"
@@ -428,7 +433,8 @@ def get_class_names(model_name, model, framework="torch"):
         return PASCAL_VOC_CLASSES
     # PyTorch models
     if model_name in ["yolo11", "yolo26"]:
-        return list(model.names.values())
+        names = model.names
+        return [names[class_id] for class_id in range(len(names))]
     return COCO_CLASSES
 
 
