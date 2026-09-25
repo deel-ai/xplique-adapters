@@ -229,9 +229,11 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
 
     Head:
         one-to-many (default): uses the original dense YOLO-style head.
-        one-to-one: for end2end-capable heads (e.g., YOLO26), this branch is available in
-        addition. It is patched to be fully differentiable by removing the detach() in
-        the forward pass.
+        one-to-one: requires an actively enabled end2end head (e.g., YOLO26
+        with ``head.end2end`` true). Merely having one-to-one layers is not
+        enough because a disabled head decodes a different box layout. The
+        active branch is patched to be fully differentiable by removing the
+        detach() in the forward pass.
     """
 
     @classmethod
@@ -268,7 +270,8 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
         mode
             Detection path to expose through the extractor. ``ONE_TO_MANY`` keeps
             the dense YOLO11-style path. ``ONE_TO_ONE`` uses the YOLO26 end2end
-            path with the differentiable one2one forward patch.
+            path with the differentiable one2one forward patch. It requires the
+            head's end-to-end mode to be active, not merely available.
 
         Returns
         -------
@@ -279,6 +282,7 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
         ------
         ValueError
             If extraction_layer is out of valid range or points to an invalid layer type.
+            If ``ONE_TO_ONE`` is requested without an actively enabled end-to-end head.
         """
 
         def g(self, x) -> LatentDataYolo:
@@ -332,13 +336,9 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
             formatter = YoloOneToManyFormatter()
         elif mode == YoloExtractorMode.ONE_TO_ONE:
             head_detect = model.model[-1]
-            has_one_to_one = (
-                getattr(head_detect, "end2end", False)
-                or getattr(head_detect, "one2one_cv2", None) is not None
-            )
-            if not has_one_to_one:
+            if not getattr(head_detect, "end2end", False):
                 raise ValueError(
-                    "ONE_TO_ONE mode requires a YOLO end2end detection head with one2one branches."
+                    "ONE_TO_ONE mode requires an active end-to-end YOLO detection head."
                 )
             differentiable_model = make_head_end2end_differentiable(model)
             if nb_classes is None:
