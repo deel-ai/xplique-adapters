@@ -97,16 +97,55 @@ def test_yolo_raw_wrapper_init():
     assert wrapper is not None
 
 
-def test_yolo_result_wrapper_init():
-    """Test that YoloResultBoxesModelWrapper can be initialized."""
+def _make_synthetic_result():
+    """Build a genuine Ultralytics Results object for wrapper tests."""
+    import numpy as np
+    from ultralytics.engine.results import Results
 
-    class MockModel(torch.nn.Module):
+    orig_img = np.zeros((640, 640, 3), dtype=np.uint8)
+    names = {0: "person", 1: "bicycle"}
+    boxes = torch.tensor([[10.0, 20.0, 30.0, 40.0, 0.75, 0.0]])
+    return Results(orig_img=orig_img, path="synthetic.jpg", names=names, boxes=boxes)
+
+
+def test_yolo_result_wrapper_formats_results():
+    """YoloResultBoxesModelWrapper formats a genuine Results contract."""
+    result = _make_synthetic_result()
+
+    class MockResultsModel(torch.nn.Module):
         def forward(self, x):
-            return []  # Would return Results objects
+            return [result]
 
-    model = MockModel()
-    wrapper = YoloResultBoxesModelWrapper(model)
-    assert wrapper is not None
+    wrapper = YoloResultBoxesModelWrapper(MockResultsModel())
+    outputs = wrapper(torch.zeros(1, 3, 640, 640))
+
+    assert isinstance(outputs, list)
+    assert len(outputs) == 1
+    assert outputs[0].shape == (1, 7)
+    torch.testing.assert_close(
+        outputs[0],
+        torch.tensor([[10.0, 20.0, 30.0, 40.0, 0.75, 1.0, 0.0]]),
+    )
+
+
+def test_yolo_result_wrapper_registers_public_yolo_with_mocked_predict():
+    """The public YOLO object registers and dispatches to its mocked predict()."""
+    from ultralytics import YOLO
+
+    result = _make_synthetic_result()
+    yolo = YOLO("yolo11n.yaml")
+
+    def _mock_predict(source=None, stream=False, **kwargs):
+        assert stream is False
+        return [result]
+
+    yolo.predict = _mock_predict  # type: ignore[method-assign]
+    wrapper = YoloResultBoxesModelWrapper(yolo)
+
+    assert wrapper._modules["model"] is yolo
+    outputs = wrapper(torch.zeros(1, 3, 640, 640))
+    assert len(outputs) == 1
+    assert outputs[0].shape == (1, 7)
 
 
 def test_yolo26_raw_formatter_init():
