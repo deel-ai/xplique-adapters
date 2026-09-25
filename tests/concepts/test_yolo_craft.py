@@ -21,6 +21,7 @@ from xplique_adapters.concepts.torch.latent_data_yolo import (
     YoloExtractorBuilder,
     YoloExtractorMode,
 )
+from xplique_adapters.object_detection.torch import YoloOneToOneFormatter
 
 pp = pprint.PrettyPrinter(indent=4)
 print(torch.__version__)
@@ -268,6 +269,41 @@ def test_one_to_one_requires_active_end2end():
             mode=YoloExtractorMode.ONE_TO_ONE,
             device="cpu",
         )
+
+
+def test_yolo26_one_to_one_upstream_eval_matches_extractor_and_gradients():
+    """Evaluation-mode upstream Detect.forward retains the one-to-one gradient graph."""
+    from ultralytics import YOLO
+
+    model = YOLO("yolo26n.yaml").model.eval()
+    head = model.model[-1]
+    assert head.end2end
+    image = torch.rand(1, 3, 64, 64)
+    formatter = YoloOneToOneFormatter(nb_classes=head.nc)
+    with torch.no_grad():
+        original_output = model(image)
+        assert original_output[0].shape[-1] == 6
+        expected = formatter(original_output)[0]
+
+    extractor = YoloExtractorBuilder.build(
+        model,
+        extraction_layer=10,
+        nb_classes=head.nc,
+        mode=YoloExtractorMode.ONE_TO_ONE,
+        device="cpu",
+    )
+    assert extractor.model is not model
+    assert not hasattr(model, "g") and not hasattr(model, "h")
+    copied_head = extractor.model.model[-1]
+    assert copied_head.forward.__func__ is type(copied_head).forward
+
+    differentiable_image = image.detach().requires_grad_(True)
+    actual = extractor(differentiable_image)[0]
+    torch.testing.assert_close(actual, expected)
+    actual[:, :5].sum().backward()
+    assert differentiable_image.grad is not None
+    assert torch.isfinite(differentiable_image.grad).all()
+    assert differentiable_image.grad.abs().sum() > 0
 
 
 def test_yolo26_example_one_to_one_cpu_path():

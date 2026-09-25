@@ -128,75 +128,6 @@ class LatentDataYolo(LatentData):
         return f"LatentDataYolo(x shape: {self.x.shape}, y length: {len(self.y)})"
 
 
-def make_head_end2end_differentiable(
-    model: "ultralytics.nn.tasks.DetectionModel",
-) -> "ultralytics.nn.tasks.DetectionModel":
-    """
-    Create a differentiable version of a YOLO26 model's end2end detection head.
-
-    In ``Detect.forward`` the one2one branch is intentionally computed from detached
-    features (``x_detach = [xi.detach() for xi in x]``) so that the bipartite-matching
-    training loss cannot back-propagate into the shared backbone.  For attribution
-    methods this breaks the gradient graph.
-
-    This function creates a deep copy of the model and replaces ``Detect.forward`` with
-    an identical version that simply omits the ``.detach()`` call, so gradients flow
-    through the one2one branch end-to-end.  All downstream operations (``_inference``,
-    ``postprocess`` via ``topk`` + ``gather``) are already differentiable.
-
-    Parameters
-    ----------
-    model
-        Original YOLO DetectionModel instance with a one-to-one head.
-
-    Returns
-    -------
-    differentiable_model
-        Deep copy of the model with a patched ``Detect.forward`` that preserves
-        gradients through the one2one branch.
-    """
-
-    # Root cause in upstream ultralytics.nn.modules.head.Detect.forward:
-    #
-    #   if self.end2end:
-    #       x_detach = [xi.detach() for xi in x]
-    #       one2one = self.forward_head(x_detach, **self.one2one)
-    #
-    # That detach severs the computation graph before the one2one branch. The
-    # decoded end2end detections then come from tensors with no grad_fn, so
-    # attribution methods fail at backward() with "tensor does not require grad".
-    #
-    # Our patch keeps the original control flow and only replaces the detached
-    # features with the live tensors from x.
-
-    def _differentiable_forward(self, x):
-        """Detect.forward without .detach() on the one2one branch."""
-        has_one_to_one = self.end2end or getattr(self, "one2one_cv2", None) is not None
-        preds = self.forward_head(x, **self.one2many)
-        if has_one_to_one:
-            # This is the critical fix: upstream uses x_detach here.
-            one2one = self.forward_head(x, **self.one2one)
-            preds = {"one2many": preds, "one2one": one2one}
-        if self.training:
-            return preds
-        y = self._inference(preds["one2one"] if has_one_to_one else preds)
-        if self.end2end:
-            y = self.postprocess(y.permute(0, 2, 1))
-        return y if self.export else (y, preds)
-
-    differentiable_model = copy.deepcopy(model)
-
-    head_detect = next(iter(differentiable_model.children()))[-1]
-    if head_detect.training:
-        print("head_detect was in training mode, switching to eval mode")
-        head_detect.eval()
-        head_detect.training = False
-
-    head_detect.forward = types.MethodType(_differentiable_forward, head_detect)
-
-    return differentiable_model
-
-
 class YoloExtractorMode(Enum):
     """Select which YOLO detection path the latent extractor should expose."""
 
@@ -232,8 +163,7 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
         one-to-one: requires an actively enabled end2end head (e.g., YOLO26
         with ``head.end2end`` true). Merely having one-to-one layers is not
         enough because a disabled head decodes a different box layout. The
-        active branch is patched to be fully differentiable by removing the
-        detach() in the forward pass.
+        upstream head preserves gradients through the active branch in eval mode.
     """
 
     @classmethod
@@ -251,7 +181,7 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
 
         This method creates custom g and h functions that split the model's forward pass
         at a specified layer: g runs layers up to extraction_layer, and h runs remaining layers.
-        The model is modified to preserve gradients through the detection head.
+        The model is evaluated to preserve gradients through the detection head.
 
         Parameters
         ----------
@@ -270,7 +200,7 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
         mode
             Detection path to expose through the extractor. ``ONE_TO_MANY`` keeps
             the dense YOLO11-style path. ``ONE_TO_ONE`` uses the YOLO26 end2end
-            path with the differentiable one2one forward patch. It requires the
+            path using the upstream evaluation-mode forward. It requires the
             head's end-to-end mode to be active, not merely available.
 
         Returns
@@ -340,11 +270,15 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
                 raise ValueError(
                     "ONE_TO_ONE mode requires an active end-to-end YOLO detection head."
                 )
-            differentiable_model = make_head_end2end_differentiable(model)
             if nb_classes is None:
                 raise ValueError(
                     "ONE_TO_ONE mode requires nb_classes when no custom formatter is provided."
                 )
+            # Ultralytics 8.4.120 Detect.forward detaches one-to-one features only
+            # during training; evaluation preserves gradients through decoding/top-k.
+            # Use the upstream forward and copy the model to isolate g()/h() bindings.
+            # Keep output-parity and input-gradient coverage when upgrading Ultralytics.
+            differentiable_model = copy.deepcopy(model)
             formatter = YoloOneToOneFormatter(nb_classes=nb_classes)
         else:
             raise ValueError(f"Unsupported YoloExtractorMode: {mode}")
