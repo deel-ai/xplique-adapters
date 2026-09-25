@@ -65,7 +65,7 @@ Each wrapper is paired with a formatter for a specific model output stage. A
 wrapper is not automatically a raw-model or post-processing wrapper: this is
 determined by the formatter it uses.
 
-| Model family | Wrapper input | Post-processing status | Why this wrapper exists |
+| Model family | Wrapped model output | Post-processing status | Why this wrapper exists |
 |---|---|---|---|
 | Ultralytics YOLO (`YoloResultBoxesModelWrapper`) | `Results` objects | Post-processed, typically after decoding and NMS | Standard `model(images)` inference output |
 | Ultralytics YOLO (`Yolo11RawBoxesModelWrapper`, `Yolo26RawBoxesModelWrapper`) | Raw internal tensors | Before the usual result/NMS post-processing | Needed when explaining internal YOLO branches or raw model outputs |
@@ -95,8 +95,8 @@ Three formatters cover the two main YOLO output modes:
 | Class | Input format | When to use |
 |---|---|---|
 | `YoloResultBoxFormatter` | Ultralytics `Results` objects (XYXY, absolute px) | Default YOLO inference — `model(images)` returns `Results` |
-| `YoloOneToManyFormatter` | Raw tuple `(tensor, aux)`, CXCYWH normalized | YOLO 11 internal raw output (before post-processing) |
-| `YoloOneToOneFormatter` | Raw tuple `(tensor, aux)`, XYXY normalized | YOLO 26 internal raw output (before post-processing) |
+| `YoloOneToManyFormatter` | Inference tuple `(tensor, aux={"boxes", "scores", "feats"})`, CXCYWH in input-image pixels | YOLO 11 decoded detections before Results/NMS |
+| `YoloOneToOneFormatter` | Inference tuple `(tensor, aux={"one2many", "one2one"})`, XYXY in input-image pixels | YOLO 26 decoded, top-k detections before Results |
 
 Corresponding wrappers:
 
@@ -114,8 +114,20 @@ Corresponding wrappers:
 from ultralytics import YOLO
 from xplique_adapters.object_detection.torch import YoloResultBoxesModelWrapper
 
-model = YOLO("yolo11n.pt").model
-wrapper = YoloResultBoxesModelWrapper(model)
+yolo = YOLO("yolo11n.pt")
+wrapper = YoloResultBoxesModelWrapper(yolo)  # Pass the public YOLO object, not yolo.model.
+```
+
+> `YoloResultBoxesModelWrapper` expects a module returning a non-streaming
+> `list[Results]`. Pass the public `YOLO` object with its default `stream=False`;
+> `yolo.model` is the internal `DetectionModel` and returns inference tensors/tuples
+> instead. This postprocessed Results path is intended for inference and black-box methods.
+
+```python
+from xplique_adapters.object_detection.torch import YoloResultBoxFormatter
+
+results = yolo(images)
+formatted_results = YoloResultBoxFormatter()(results)
 ```
 
 ---

@@ -21,6 +21,7 @@ from xplique_adapters.concepts.torch.latent_data_yolo import (
     YoloExtractorBuilder,
     YoloExtractorMode,
 )
+from xplique_adapters.object_detection.torch import YoloOneToOneFormatter
 
 pp = pprint.PrettyPrinter(indent=4)
 print(torch.__version__)
@@ -74,7 +75,6 @@ def model_data(image_data, device_param, yolo_model_version):
     from ultralytics import YOLO
 
     model = YOLO(yolo_model_version).to(device_param)
-    model.eval()
     detection_model = model.model
     detection_model.eval()
     detection_model = detection_model.to(device_param)
@@ -100,102 +100,15 @@ def test_gradients_model_original(image_data, model_data):
 
 
 @pytest.fixture(scope="function")
-def dataset_classes():
-    # COCO classes
-    CLASSES = [
-        "N/A",
-        "person",
-        "bicycle",
-        "car",
-        "motorcycle",
-        "airplane",
-        "bus",
-        "train",
-        "truck",
-        "boat",
-        "traffic light",
-        "fire hydrant",
-        "N/A",
-        "stop sign",
-        "parking meter",
-        "bench",
-        "bird",
-        "cat",
-        "dog",
-        "horse",
-        "sheep",
-        "cow",
-        "elephant",
-        "bear",
-        "zebra",
-        "giraffe",
-        "N/A",
-        "backpack",
-        "umbrella",
-        "N/A",
-        "N/A",
-        "handbag",
-        "tie",
-        "suitcase",
-        "frisbee",
-        "skis",
-        "snowboard",
-        "sports ball",
-        "kite",
-        "baseball bat",
-        "baseball glove",
-        "skateboard",
-        "surfboard",
-        "tennis racket",
-        "bottle",
-        "N/A",
-        "wine glass",
-        "cup",
-        "fork",
-        "knife",
-        "spoon",
-        "bowl",
-        "banana",
-        "apple",
-        "sandwich",
-        "orange",
-        "broccoli",
-        "carrot",
-        "hot dog",
-        "pizza",
-        "donut",
-        "cake",
-        "chair",
-        "couch",
-        "potted plant",
-        "bed",
-        "N/A",
-        "dining table",
-        "N/A",
-        "N/A",
-        "toilet",
-        "N/A",
-        "tv",
-        "laptop",
-        "mouse",
-        "remote",
-        "keyboard",
-        "cell phone",
-        "microwave",
-        "oven",
-        "toaster",
-        "sink",
-        "refrigerator",
-        "N/A",
-        "book",
-        "clock",
-        "vase",
-        "scissors",
-        "teddy bear",
-        "hair drier",
-        "toothbrush",
-    ]
-    nb_classes = len(CLASSES)
+def dataset_classes(model_data):
+    # Ultralytics COCO heads use contiguous class IDs; derive names from the
+    # loaded model instead of the sparse torchvision-style table.
+    model, _, _ = model_data
+    names = model.names
+    nb_classes = len(names)
+    head = model.model.model[-1]
+    assert head.nc == nb_classes
+    CLASSES = [names[class_id] for class_id in range(nb_classes)]
     label_to_color = {
         "person": "r",
         "bicycle": "b",
@@ -212,13 +125,10 @@ def latent_extractor_data(dataset_classes, model_data, device_param):
     model, _, _yolo_model_version = model_data
     detection_model = model.model
 
-    # Select the detection path from the loaded head capabilities.
+    # Select the detection path from the active head state. Branch existence
+    # alone is not enough: a disabled end-to-end head returns (B, 4+C, N).
     head_detect = detection_model.model[-1]
-    has_one_to_one = (
-        getattr(head_detect, "end2end", False)
-        or getattr(head_detect, "one2one_cv2", None) is not None
-    )
-    if has_one_to_one:
+    if getattr(head_detect, "end2end", False):
         mode = YoloExtractorMode.ONE_TO_ONE
     else:
         mode = YoloExtractorMode.ONE_TO_MANY
@@ -234,10 +144,19 @@ def latent_extractor_data(dataset_classes, model_data, device_param):
     return latent_extractor
 
 
-def test_latent_extractor(image_data, dataset_classes, latent_extractor_data):
+def test_latent_extractor(
+    image_data, dataset_classes, latent_extractor_data, model_data
+):
     image, input_tensor = image_data
-    classes_names, _nb_classes, label_to_color = dataset_classes
+    classes_names, nb_classes, label_to_color = dataset_classes
+    _, _, yolo_model_version = model_data
     latent_extractor = latent_extractor_data
+
+    assert nb_classes == 80
+    assert classes_names[0] == "person"
+    assert classes_names[23] == "giraffe"
+    if yolo_model_version == "yolo26n.pt":
+        assert getattr(model_data[0].model.model[-1], "end2end", False)
 
     results = latent_extractor(input_tensor)
     print("Latent Data YOLO:", results)
@@ -249,9 +168,94 @@ def test_latent_extractor(image_data, dataset_classes, latent_extractor_data):
     assert isinstance(results[0], TorchMultiBoxTensor), (
         "Result should be a MultiBoxTensor"
     )
+    assert results[0].shape[-1] == 5 + nb_classes
+    assert torch.isfinite(results[0]).all()
+
+    if yolo_model_version == "yolo26n.pt":
+        probas = results[0][:, 5:]
+        assert probas.shape[-1] == nb_classes
+        torch.testing.assert_close(
+            probas.sum(dim=-1),
+            torch.ones(probas.shape[0], device=probas.device),
+        )
 
     filtered_results = results[0].filter(confidence=0.5)
     plot_image_detections(image, filtered_results, classes_names, label_to_color)
+
+
+def test_one_to_one_requires_active_end2end():
+    """Branch existence alone must not select the (B, N, 6) one-to-one path."""
+    from ultralytics import YOLO
+
+    detection_model = YOLO("yolo26n.yaml").model
+    head = detection_model.model[-1]
+    assert getattr(head, "one2one_cv2", None) is not None
+    head.end2end = False
+    assert not head.end2end
+    with pytest.raises(ValueError, match="active end-to-end"):
+        YoloExtractorBuilder.build(
+            detection_model,
+            extraction_layer=10,
+            nb_classes=head.nc,
+            mode=YoloExtractorMode.ONE_TO_ONE,
+            device="cpu",
+        )
+
+
+def test_yolo26_one_to_one_upstream_eval_matches_extractor_and_gradients():
+    """Evaluation-mode upstream Detect.forward retains the one-to-one gradient graph."""
+    from ultralytics import YOLO
+
+    model = YOLO("yolo26n.yaml").model.eval()
+    head = model.model[-1]
+    assert head.end2end
+    image = torch.rand(1, 3, 64, 64)
+    formatter = YoloOneToOneFormatter(nb_classes=head.nc)
+    with torch.no_grad():
+        original_output = model(image)
+        assert original_output[0].shape[-1] == 6
+        expected = formatter(original_output)[0]
+
+    extractor = YoloExtractorBuilder.build(
+        model,
+        extraction_layer=10,
+        nb_classes=head.nc,
+        mode=YoloExtractorMode.ONE_TO_ONE,
+        device="cpu",
+    )
+    assert extractor.model is not model
+    assert not hasattr(model, "g") and not hasattr(model, "h")
+    copied_head = extractor.model.model[-1]
+    assert copied_head.forward.__func__ is type(copied_head).forward
+
+    differentiable_image = image.detach().requires_grad_(True)
+    actual = extractor(differentiable_image)[0]
+    torch.testing.assert_close(actual, expected)
+    actual[:, :5].sum().backward()
+    assert differentiable_image.grad is not None
+    assert torch.isfinite(differentiable_image.grad).all()
+    assert differentiable_image.grad.abs().sum() > 0
+
+
+def test_yolo26_example_one_to_one_cpu_path():
+    """The attribution example retains end2end and passes its CPU device to the builder."""
+    from examples import run_object_detection_attributions as example
+
+    config = {**example.MODEL_CONFIGS["yolo26"], "model_path": "yolo26n.yaml"}
+    model, _ = example.load_model("yolo26", config, torch.device("cpu"))
+    head = model.model.model[-1]
+    assert head.end2end
+
+    extractor = example.create_wrapper(
+        "yolo26", model, config, torch.device("cpu"), use_raw_wrapper=True
+    )
+    assert extractor.device == torch.device("cpu")
+    output = extractor(torch.rand(1, 3, 64, 64))[0]
+    assert output.shape[-1] == 5 + head.nc
+    assert torch.isfinite(output).all()
+    probas = output[:, 5:]
+    assert probas.shape[-1] == head.nc
+    torch.testing.assert_close(probas.sum(dim=-1), torch.ones(len(probas)))
 
 
 def test_latent_extractor_gradients(image_data, latent_extractor_data):
