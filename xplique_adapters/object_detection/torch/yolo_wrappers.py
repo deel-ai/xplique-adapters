@@ -33,7 +33,8 @@ class YoloResultBoxesModelWrapper(TorchBoxesModelWrapper):
         Parameters
         ----------
         model
-            PyTorch YOLO object detection model that returns Results objects.
+            Module returning a non-streaming ``list[Results]``, typically the
+            public Ultralytics YOLO model. Do not pass its inner ``.model``.
         """
         box_formatter = YoloResultBoxFormatter()
         super().__init__(model, box_formatter=box_formatter)
