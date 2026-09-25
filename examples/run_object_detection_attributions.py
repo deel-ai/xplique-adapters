@@ -245,9 +245,7 @@ def load_model(model_name, config, device):
         warnings.filterwarnings('ignore')
         model_path = config.get("model_path", "yolo11n.pt")
         model = YOLO(model_path, verbose=False)
-        model.eval()
-        if config["model_path"] == "yolo26n.pt":
-            model.model.model[-1].end2end = False
+        # Keep YOLO26's end2end mode active for the ONE_TO_ONE extractor path.
         return model, None
 
     else:
@@ -286,6 +284,7 @@ def create_wrapper(model_name, model, config, device, use_raw_wrapper=False):
                 batch_size=batch_size,
                 nb_classes=nb_classes,
                 mode=mode,
+                device=str(device),
             )
         else:
             raise ValueError(f"Raw wrapper not supported for model: {model_name}")
