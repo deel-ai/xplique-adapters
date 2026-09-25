@@ -245,7 +245,8 @@ def load_model(model_name, config, device):
         warnings.filterwarnings('ignore')
         model_path = config.get("model_path", "yolo11n.pt")
         model = YOLO(model_path, verbose=False)
-        # Keep YOLO26's end2end mode active for the ONE_TO_ONE extractor path.
+        # The ONE_TO_ONE extractor runs YOLO26's one-to-one branch directly,
+        # whatever the head's end2end flag (off by default from Ultralytics 8.4.142).
         return model, None
 
     else:
