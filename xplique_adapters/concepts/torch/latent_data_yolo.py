@@ -20,6 +20,7 @@ import numpy as np
 import torch
 import ultralytics
 from torch import Tensor
+from ultralytics.nn.modules.head import Detect
 from xplique.concepts.latent_extractor import LatentData, LatentExtractorBuilder
 from xplique.concepts.torch.latent_extractor import TorchLatentExtractor
 
@@ -128,80 +129,55 @@ class LatentDataYolo(LatentData):
         return f"LatentDataYolo(x shape: {self.x.shape}, y length: {len(self.y)})"
 
 
-def make_head_end2end_differentiable(
-    model: "ultralytics.nn.tasks.DetectionModel",
-) -> "ultralytics.nn.tasks.DetectionModel":
-    """
-    Create a differentiable version of a YOLO26 model's end2end detection head.
-
-    In ``Detect.forward`` the one2one branch is intentionally computed from detached
-    features (``x_detach = [xi.detach() for xi in x]``) so that the bipartite-matching
-    training loss cannot back-propagate into the shared backbone.  For attribution
-    methods this breaks the gradient graph.
-
-    This function creates a deep copy of the model and replaces ``Detect.forward`` with
-    an identical version that simply omits the ``.detach()`` call, so gradients flow
-    through the one2one branch end-to-end.  All downstream operations (``_inference``,
-    ``postprocess`` via ``topk`` + ``gather``) are already differentiable.
-
-    Parameters
-    ----------
-    model
-        Original YOLO DetectionModel instance with a one-to-one head.
-
-    Returns
-    -------
-    differentiable_model
-        Deep copy of the model with a patched ``Detect.forward`` that preserves
-        gradients through the one2one branch.
-    """
-
-    # Root cause in upstream ultralytics.nn.modules.head.Detect.forward:
-    #
-    #   if self.end2end:
-    #       x_detach = [xi.detach() for xi in x]
-    #       one2one = self.forward_head(x_detach, **self.one2one)
-    #
-    # That detach severs the computation graph before the one2one branch. The
-    # decoded end2end detections then come from tensors with no grad_fn, so
-    # attribution methods fail at backward() with "tensor does not require grad".
-    #
-    # Our patch keeps the original control flow and only replaces the detached
-    # features with the live tensors from x.
-
-    def _differentiable_forward(self, x):
-        """Detect.forward without .detach() on the one2one branch."""
-        has_one_to_one = self.end2end or getattr(self, "one2one_cv2", None) is not None
-        preds = self.forward_head(x, **self.one2many)
-        if has_one_to_one:
-            # This is the critical fix: upstream uses x_detach here.
-            one2one = self.forward_head(x, **self.one2one)
-            preds = {"one2many": preds, "one2one": one2one}
-        if self.training:
-            return preds
-        y = self._inference(preds["one2one"] if has_one_to_one else preds)
-        if self.end2end:
-            y = self.postprocess(y.permute(0, 2, 1))
-        return y if self.export else (y, preds)
-
-    differentiable_model = copy.deepcopy(model)
-
-    head_detect = next(iter(differentiable_model.children()))[-1]
-    if head_detect.training:
-        print("head_detect was in training mode, switching to eval mode")
-        head_detect.eval()
-        head_detect.training = False
-
-    head_detect.forward = types.MethodType(_differentiable_forward, head_detect)
-
-    return differentiable_model
-
-
 class YoloExtractorMode(Enum):
     """Select which YOLO detection path the latent extractor should expose."""
 
     ONE_TO_MANY = "one_to_many"
     ONE_TO_ONE = "one_to_one"
+
+
+def _has_branch(head: Detect, prefix: str) -> bool:
+    """Return whether ``head`` still holds the box branch named ``prefix + "cv2"``."""
+    return getattr(head, f"{prefix}cv2", None) is not None
+
+
+def _run_detect_head(
+    head: Detect, x: list[Tensor], mode: YoloExtractorMode
+) -> tuple[Tensor, dict]:
+    """
+    Run the selected branch of an Ultralytics ``Detect`` head in inference layout.
+
+    ``Detect.forward`` is not used because its behaviour changed across
+    Ultralytics 8.4.x: older releases detach the one-to-one inputs even in
+    evaluation mode, and from 8.4.142 the active branch depends on a ``end2end``
+    flag that defaults to ``False``. Calling the head components directly keeps
+    the gradient graph intact and the output layout fixed by ``mode``. The
+    returned tuple mirrors the upstream evaluation output for that branch.
+
+    Parameters
+    ----------
+    head
+        Detection head whose ``end2end`` flag matches ``mode`` (it selects the
+        decoded box format).
+    x
+        Multi-scale feature maps feeding the head.
+    mode
+        Branch to run.
+
+    Returns
+    -------
+    outputs
+        ``ONE_TO_MANY``: ``(B, 4 + C, A)`` CXCYWH pixel boxes and class
+        probabilities, with the ``{"boxes", "scores", "feats"}`` dictionary.
+        ``ONE_TO_ONE``: ``(B, K, 6)`` XYXY pixel boxes, score and class ID,
+        with the ``{"one2many", "one2one"}`` dictionary.
+    """
+    one2many = head.forward_head(x, **head.one2many)
+    if mode == YoloExtractorMode.ONE_TO_MANY:
+        return head._inference(one2many), one2many
+    one2one = head.forward_head(x, **head.one2one)
+    detections = head.postprocess(head._inference(one2one).permute(0, 2, 1))
+    return detections, {"one2many": one2many, "one2one": one2one}
 
 
 class YoloExtractorBuilder(LatentExtractorBuilder):
@@ -228,12 +204,13 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
         10 -> (11) -> 12 -> 13 -> (14) -> 15 -> 16 -> (17) -> 18 -> 19 -> (20) -> 21
 
     Head:
-        one-to-many (default): uses the original dense YOLO-style head.
-        one-to-one: requires an actively enabled end2end head (e.g., YOLO26
-        with ``head.end2end`` true). Merely having one-to-one layers is not
-        enough because a disabled head decodes a different box layout. The
-        active branch is patched to be fully differentiable by removing the
-        detach() in the forward pass.
+        The detection head is run branch by branch rather than through
+        ``Detect.forward`` (see ``_run_detect_head``), so the result does not
+        depend on the Ultralytics version or on the model's ``end2end`` flag.
+        one-to-many (default): the dense YOLO-style branch, available on YOLO11
+        and YOLO26 models.
+        one-to-one: the NMS-free branch of end-to-end capable heads (e.g.
+        YOLO26), whether or not ``end2end`` is currently enabled.
     """
 
     @classmethod
@@ -251,7 +228,8 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
 
         This method creates custom g and h functions that split the model's forward pass
         at a specified layer: g runs layers up to extraction_layer, and h runs remaining layers.
-        The model is modified to preserve gradients through the detection head.
+        The extractor works on an evaluation-mode deep copy of ``model``; the
+        caller's model is left unchanged.
 
         Parameters
         ----------
@@ -268,10 +246,10 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
             Number of classes for ``YoloOneToOneFormatter`` when using
             ``ONE_TO_ONE`` mode without providing a custom formatter.
         mode
-            Detection path to expose through the extractor. ``ONE_TO_MANY`` keeps
-            the dense YOLO11-style path. ``ONE_TO_ONE`` uses the YOLO26 end2end
-            path with the differentiable one2one forward patch. It requires the
-            head's end-to-end mode to be active, not merely available.
+            Detection branch to expose through the extractor. ``ONE_TO_MANY``
+            uses the dense branch and requires it not to have been removed by
+            fusion. ``ONE_TO_ONE`` uses the NMS-free top-k branch and requires a
+            head with one-to-one layers (e.g. YOLO26).
 
         Returns
         -------
@@ -282,7 +260,9 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
         ------
         ValueError
             If extraction_layer is out of valid range or points to an invalid layer type.
-            If ``ONE_TO_ONE`` is requested without an actively enabled end-to-end head.
+            If the head lacks the branch required by ``mode``.
+        TypeError
+            If the last layer is not an Ultralytics ``Detect`` head.
         """
 
         def g(self, x) -> LatentDataYolo:
@@ -298,13 +278,14 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
                 y.append(x if m.i in self.save else None)  # save output
             return LatentDataYolo(x, y)
 
-        def h(self, latent_data: LatentDataYolo) -> Tensor:
+        def h(self, latent_data: LatentDataYolo) -> tuple[Tensor, dict]:
 
             x, y = latent_data.x, latent_data.y
             # to avoid in-place modifications
             # x = x.clone()
             y = [yi.clone() if yi is not None else None for yi in y]
 
+            head = self.model[-1]
             for m in self.model[extraction_layer:]:
                 if m.f != -1:  # if not from previous layer
                     x = (
@@ -312,9 +293,11 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
                         if isinstance(m.f, int)
                         else [x if j == -1 else y[j] for j in m.f]
                     )  # from earlier layers
+                if m is head:
+                    return _run_detect_head(m, x, mode)
                 x = m(x)  # run
                 y.append(x if m.i in self.save else None)
-            return x
+            raise RuntimeError("YOLO model has no detection head to run.")
 
         # check on extraction_layer value
         if extraction_layer < 0 or extraction_layer >= len(model.model):
@@ -326,21 +309,26 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
                 f"extraction_layer must not be a layer that takes input only from the previous layer (but here f={model.model[extraction_layer].f})"
             )
 
-        if model.training:
-            print("model was in training mode, switching to eval mode")
-            model.eval()
-            model.training = False
+        head_detect = model.model[-1]
+        if not isinstance(head_detect, Detect):
+            raise TypeError(
+                "YoloExtractorBuilder requires an Ultralytics Detect head as the "
+                f"last layer, got {type(head_detect).__name__}."
+            )
 
         if mode == YoloExtractorMode.ONE_TO_MANY:
-            differentiable_model = model
+            if not _has_branch(head_detect, ""):
+                raise ValueError(
+                    "ONE_TO_MANY mode requires the one-to-many branch, which was "
+                    "removed when the model was fused."
+                )
             formatter = YoloOneToManyFormatter()
         elif mode == YoloExtractorMode.ONE_TO_ONE:
-            head_detect = model.model[-1]
-            if not getattr(head_detect, "end2end", False):
+            if not _has_branch(head_detect, "one2one_"):
                 raise ValueError(
-                    "ONE_TO_ONE mode requires an active end-to-end YOLO detection head."
+                    "ONE_TO_ONE mode requires a YOLO detection head with "
+                    "one-to-one branches (e.g. YOLO26)."
                 )
-            differentiable_model = make_head_end2end_differentiable(model)
             if nb_classes is None:
                 raise ValueError(
                     "ONE_TO_ONE mode requires nb_classes when no custom formatter is provided."
@@ -348,6 +336,13 @@ class YoloExtractorBuilder(LatentExtractorBuilder):
             formatter = YoloOneToOneFormatter(nb_classes=nb_classes)
         else:
             raise ValueError(f"Unsupported YoloExtractorMode: {mode}")
+
+        # Work on a copy: g()/h() bindings, evaluation mode and the end2end flag
+        # must not leak into the caller's model. The flag only selects the box
+        # decoding (XYXY for one-to-one, CXCYWH for one-to-many); the branch run
+        # is chosen explicitly by _run_detect_head.
+        differentiable_model = copy.deepcopy(model).eval()
+        differentiable_model.model[-1].end2end = mode == YoloExtractorMode.ONE_TO_ONE
 
         differentiable_model.g = types.MethodType(g, differentiable_model)
         differentiable_model.h = types.MethodType(h, differentiable_model)

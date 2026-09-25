@@ -21,6 +21,10 @@ from xplique_adapters.concepts.torch.latent_data_yolo import (
     YoloExtractorBuilder,
     YoloExtractorMode,
 )
+from xplique_adapters.object_detection.torch import (
+    YoloOneToManyFormatter,
+    YoloOneToOneFormatter,
+)
 
 pp = pprint.PrettyPrinter(indent=4)
 print(torch.__version__)
@@ -118,16 +122,19 @@ def dataset_classes(model_data):
     return CLASSES, nb_classes, label_to_color
 
 
+def _has_one_to_one_branch(detection_model):
+    return getattr(detection_model.model[-1], "one2one_cv2", None) is not None
+
+
 @pytest.fixture(scope="function")
 def latent_extractor_data(dataset_classes, model_data, device_param):
     _classes_names, nb_classes, _label_to_color = dataset_classes
     model, _, _yolo_model_version = model_data
     detection_model = model.model
 
-    # Select the detection path from the active head state. Branch existence
-    # alone is not enough: a disabled end-to-end head returns (B, 4+C, N).
-    head_detect = detection_model.model[-1]
-    if getattr(head_detect, "end2end", False):
+    # Select the branch from the head architecture, not from its end2end flag:
+    # the flag's default changed across Ultralytics 8.4.x releases.
+    if _has_one_to_one_branch(detection_model):
         mode = YoloExtractorMode.ONE_TO_ONE
     else:
         mode = YoloExtractorMode.ONE_TO_MANY
@@ -154,8 +161,9 @@ def test_latent_extractor(
     assert nb_classes == 80
     assert classes_names[0] == "person"
     assert classes_names[23] == "giraffe"
-    if yolo_model_version == "yolo26n.pt":
-        assert getattr(model_data[0].model.model[-1], "end2end", False)
+    assert _has_one_to_one_branch(model_data[0].model) == (
+        yolo_model_version == "yolo26n.pt"
+    )
 
     results = latent_extractor(input_tensor)
     print("Latent Data YOLO:", results)
@@ -182,16 +190,14 @@ def test_latent_extractor(
     plot_image_detections(image, filtered_results, classes_names, label_to_color)
 
 
-def test_one_to_one_requires_active_end2end():
-    """Branch existence alone must not select the (B, N, 6) one-to-one path."""
+def test_one_to_one_requires_one_to_one_branch():
+    """ONE_TO_ONE is rejected for heads without one-to-one layers (e.g. YOLO11)."""
     from ultralytics import YOLO
 
-    detection_model = YOLO("yolo26n.yaml").model
+    detection_model = YOLO("yolo11n.yaml").model
     head = detection_model.model[-1]
-    assert getattr(head, "one2one_cv2", None) is not None
-    head.end2end = False
-    assert not head.end2end
-    with pytest.raises(ValueError, match="active end-to-end"):
+    assert getattr(head, "one2one_cv2", None) is None
+    with pytest.raises(ValueError, match="one-to-one branches"):
         YoloExtractorBuilder.build(
             detection_model,
             extraction_layer=10,
@@ -201,14 +207,89 @@ def test_one_to_one_requires_active_end2end():
         )
 
 
+def _yolo26_reference(end2end, image):
+    """Upstream evaluation output of a fresh YOLO26 model with ``end2end`` set."""
+    from ultralytics import YOLO
+
+    torch.manual_seed(0)
+    model = YOLO("yolo26n.yaml").model.eval()
+    model.end2end = end2end
+    with torch.no_grad():
+        upstream = model(image)
+    return model, upstream
+
+
+def _assert_input_gradients(extractor, image, nb_columns):
+    differentiable_image = image.detach().requires_grad_(True)
+    actual = extractor(differentiable_image)[0]
+    actual[:, :nb_columns].sum().backward()
+    assert differentiable_image.grad is not None
+    assert torch.isfinite(differentiable_image.grad).all()
+    assert differentiable_image.grad.abs().sum() > 0
+    return actual
+
+
+@pytest.mark.parametrize("end2end", [True, False])
+def test_yolo26_one_to_one_matches_upstream_and_keeps_gradients(end2end):
+    """ONE_TO_ONE matches upstream end-to-end inference whatever the caller's flag."""
+    image = torch.rand(1, 3, 64, 64)
+    model, _ = _yolo26_reference(end2end, image)
+    head = model.model[-1]
+    formatter = YoloOneToOneFormatter(nb_classes=head.nc)
+
+    extractor = YoloExtractorBuilder.build(
+        model,
+        extraction_layer=10,
+        nb_classes=head.nc,
+        mode=YoloExtractorMode.ONE_TO_ONE,
+        device="cpu",
+    )
+    # The caller's model is untouched: no bindings, same end2end flag.
+    assert extractor.model is not model
+    assert not hasattr(model, "g") and not hasattr(model, "h")
+    assert bool(head.end2end) == end2end
+    copied_head = extractor.model.model[-1]
+    assert copied_head.forward.__func__ is type(copied_head).forward
+
+    _, upstream = _yolo26_reference(True, image)
+    assert upstream[0].shape[-1] == 6
+    expected = formatter(upstream)[0]
+
+    actual = _assert_input_gradients(extractor, image, nb_columns=5)
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("end2end", [True, False])
+def test_yolo26_one_to_many_matches_upstream_and_keeps_gradients(end2end):
+    """ONE_TO_MANY on a YOLO26 head matches upstream dense inference."""
+    image = torch.rand(1, 3, 64, 64)
+    model, _ = _yolo26_reference(end2end, image)
+    head = model.model[-1]
+
+    extractor = YoloExtractorBuilder.build(
+        model,
+        extraction_layer=10,
+        mode=YoloExtractorMode.ONE_TO_MANY,
+        device="cpu",
+    )
+    assert bool(head.end2end) == end2end
+
+    _, upstream = _yolo26_reference(False, image)
+    assert upstream[0].shape[1] == 4 + head.nc
+    expected = YoloOneToManyFormatter()(upstream)[0]
+
+    actual = _assert_input_gradients(extractor, image, nb_columns=5)
+    torch.testing.assert_close(actual, expected)
+
+
 def test_yolo26_example_one_to_one_cpu_path():
-    """The attribution example retains end2end and passes its CPU device to the builder."""
+    """The attribution example builds a CPU ONE_TO_ONE extractor for YOLO26."""
     from examples import run_object_detection_attributions as example
 
     config = {**example.MODEL_CONFIGS["yolo26"], "model_path": "yolo26n.yaml"}
     model, _ = example.load_model("yolo26", config, torch.device("cpu"))
     head = model.model.model[-1]
-    assert head.end2end
+    assert _has_one_to_one_branch(model.model)
 
     extractor = example.create_wrapper(
         "yolo26", model, config, torch.device("cpu"), use_raw_wrapper=True
