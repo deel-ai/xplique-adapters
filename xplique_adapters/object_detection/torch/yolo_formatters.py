@@ -111,7 +111,8 @@ class YoloOneToManyFormatter(TorchBaseBoxFormatter):
             detection_tensor has shape (batch, 4 + classes, num_boxes) (or
             batch, 1, 4 + classes, num_boxes). The first four values are
             decoded CXCYWH coordinates in input-image pixels, followed by
-            class probabilities.
+            class probabilities. The auxiliary dict has exactly the keys
+            ``{"boxes", "scores", "feats"}``.
 
         Returns
         -------
@@ -135,23 +136,24 @@ class YoloOneToManyFormatter(TorchBaseBoxFormatter):
         assert isinstance(predictions[0], torch.Tensor), (
             f"predictions[0] should be a torch.Tensor, got {type(predictions[0])}"
         )
-        is_old_yolo_format = isinstance(predictions[1], list)
-        is_new_yolo_format = isinstance(predictions[1], dict)
-        assert is_old_yolo_format or is_new_yolo_format, (
-            f"predictions[1] should be a list (old format) or dict (new format),"
-            f"got {type(predictions[1])}"
-        )
-        n = len(predictions[1])
-        if n != 3:
-            hint = (
-                f" This looks like a YOLO26/end2end model output (predictions[1] is a dict"
-                f" with {n} keys). Use YoloOneToOneFormatter instead of YoloOneToManyFormatter."
-                if isinstance(predictions[1], dict)
-                else ""
+        aux = predictions[1]
+        if not isinstance(aux, dict):
+            raise TypeError(
+                "predictions[1] should be an auxiliary dict with keys "
+                f"{{'boxes', 'scores', 'feats'}}, got {type(aux)}"
             )
+        keys = set(aux)
+        if keys == {"one2many", "one2one"}:
             raise ValueError(
-                f"YoloOneToManyFormatter expects predictions[1] to have 3 elements "
-                f"(one feature map per detection scale), got {n}.{hint}"
+                "YoloOneToManyFormatter received an end-to-end auxiliary "
+                "dictionary with keys {'one2many', 'one2one'}. "
+                "Use YoloOneToOneFormatter instead."
+            )
+        if keys != {"boxes", "scores", "feats"}:
+            raise ValueError(
+                "YoloOneToManyFormatter expects predictions[1] to be an auxiliary "
+                "dictionary with exactly the keys {'boxes', 'scores', 'feats'}; "
+                f"got {sorted(keys)}."
             )
         nb_preds = len(predictions[0])
 
@@ -201,7 +203,8 @@ class YoloOneToOneFormatter(TorchBaseBoxFormatter):
         predictions
             Tuple containing (detection_tensor, auxiliary_data) where
             detection_tensor has shape (batch, num_boxes, 6), with absolute
-            XYXY coordinates, score, and class ID per detection.
+            XYXY coordinates, score, and class ID per detection. The auxiliary
+            dict has exactly the keys ``{"one2many", "one2one"}``.
 
         Returns
         -------
@@ -225,13 +228,18 @@ class YoloOneToOneFormatter(TorchBaseBoxFormatter):
         assert isinstance(predictions[0], torch.Tensor), (
             f"predictions[0] should be a torch.Tensor, got {type(predictions[0])}"
         )
-        is_old_yolo_format = isinstance(predictions[1], list)
-        is_new_yolo_format = isinstance(predictions[1], dict)
-        assert is_old_yolo_format or is_new_yolo_format, (
-            f"predictions[1] should be a list (old format) or dict (new format),"
-            f"got {type(predictions[1])}"
-        )
-        # assert len(predictions[1]) == 3
+        aux = predictions[1]
+        if not isinstance(aux, dict):
+            raise TypeError(
+                "predictions[1] should be an auxiliary dict with keys "
+                f"{{'one2many', 'one2one'}}, got {type(aux)}"
+            )
+        if set(aux) != {"one2many", "one2one"}:
+            raise ValueError(
+                "YoloOneToOneFormatter expects predictions[1] to be an auxiliary "
+                "dictionary with exactly the keys {'one2many', 'one2one'}; "
+                f"got {sorted(aux)}."
+            )
         nb_preds = len(predictions[0])
 
         formatted_preds = []

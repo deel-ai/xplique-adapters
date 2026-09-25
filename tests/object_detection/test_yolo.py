@@ -36,12 +36,29 @@ def test_yolo_raw_formatter_forward():
     # YOLO inference output: (batch, 1, features, num_boxes)
     # features = 4 (box coords) + num_classes (class probas)
     raw_output = torch.rand(batch_size, 1, 4 + num_classes, num_boxes)
-    predictions = (raw_output, [[None], [None], [None]])  # type: ignore
+    predictions = (raw_output, {"boxes": None, "scores": None, "feats": None})  # type: ignore
 
     results = formatter.forward(predictions)  # type: ignore
 
     assert isinstance(results, list)
     assert len(results) == batch_size
+
+
+def test_yolo_one_to_many_formatter_rejects_list_auxiliary():
+    """Only the supported Ultralytics auxiliary dictionary is accepted."""
+    formatter = YoloOneToManyFormatter()
+    raw_output = torch.rand(1, 84, 10)
+    with pytest.raises(TypeError, match="auxiliary dict"):
+        formatter((raw_output, [torch.rand(1, 16, 8, 8)] * 3))  # type: ignore
+
+
+def test_yolo_one_to_many_formatter_rejects_unrelated_three_key_dict():
+    """An unrelated three-key dict must not pass incidental length validation."""
+    formatter = YoloOneToManyFormatter()
+    raw_output = torch.rand(1, 84, 10)
+    predictions = (raw_output, {"foo": None, "bar": None, "baz": None})  # type: ignore
+    with pytest.raises(ValueError, match="boxes.*scores.*feats"):
+        formatter.forward(predictions)  # type: ignore
 
 
 @pytest.mark.parametrize("extra_axis", [False, True], ids=["native", "singleton_axis"])
@@ -73,7 +90,7 @@ def test_yolo_raw_wrapper_init():
         def forward(self, x):
             batch_size = x.shape[0]
             raw_output = torch.rand(batch_size, 84, 8400)
-            return (raw_output, [[None], [None], [None]])
+            return (raw_output, {"boxes": None, "scores": None, "feats": None})
 
     model = MockModel()
     wrapper = Yolo11RawBoxesModelWrapper(model)
@@ -116,12 +133,20 @@ def test_yolo26_raw_formatter_forward():
         ],
         dim=-1,
     )
-    predictions = (raw_output, [[None], [None], [None]])
+    predictions = (raw_output, {"one2many": None, "one2one": None})
 
     results = formatter.forward(predictions)  # type: ignore
 
     assert isinstance(results, list)
     assert len(results) == batch_size
+
+
+def test_yolo_one_to_one_formatter_rejects_list_auxiliary():
+    """Only the supported end-to-end auxiliary dictionary is accepted."""
+    formatter = YoloOneToOneFormatter(nb_classes=3)
+    raw_output = torch.tensor([[[10.0, 20.0, 30.0, 40.0, 0.75, 2.0]]])
+    with pytest.raises(TypeError, match="auxiliary dict"):
+        formatter((raw_output, [None, None]))  # type: ignore
 
 
 def test_yolo26_raw_formatter_single_detection_absolute_pixels():
@@ -150,7 +175,7 @@ def test_yolo26_raw_wrapper_init():
             batch_size = x.shape[0]
             num_boxes = 10
             raw_output = torch.rand(batch_size, num_boxes, 6)
-            return (raw_output, [[None], [None], [None]])
+            return (raw_output, {"one2many": None, "one2one": None})
 
     model = MockModel()
     wrapper = Yolo26RawBoxesModelWrapper(model, nb_classes=80)
@@ -159,30 +184,15 @@ def test_yolo26_raw_wrapper_init():
 
 def test_yolo_one_to_many_formatter_rejects_end2end_dict():
     """YoloOneToManyFormatter must raise ValueError with a helpful hint when
-    predictions[1] is a dict with 2 keys (YOLO26/end2end model output)."""
+    predictions[1] is the end-to-end dict with one2many/one2one keys."""
     formatter = YoloOneToManyFormatter()
 
     batch_size = 2
     num_boxes = 10
     num_classes = 80
     raw_output = torch.rand(batch_size, 1, 4 + num_classes, num_boxes)
-    # Simulate YOLO26 end2end output: dict with 2 keys instead of list of 3
+    # Simulate the supported YOLO26 end-to-end auxiliary dictionary.
     predictions = (raw_output, {"one2many": None, "one2one": None})  # type: ignore
 
     with pytest.raises(ValueError, match="YoloOneToOneFormatter"):
-        formatter.forward(predictions)  # type: ignore
-
-
-def test_yolo_one_to_many_formatter_rejects_wrong_list_length():
-    """YoloOneToManyFormatter must raise ValueError when predictions[1] is a list
-    with length != 3."""
-    formatter = YoloOneToManyFormatter()
-
-    batch_size = 2
-    num_boxes = 10
-    num_classes = 80
-    raw_output = torch.rand(batch_size, 1, 4 + num_classes, num_boxes)
-    predictions = (raw_output, [[None], [None]])  # type: ignore — only 2 scales
-
-    with pytest.raises(ValueError, match="3 elements"):
         formatter.forward(predictions)  # type: ignore
