@@ -75,7 +75,6 @@ def model_data(image_data, device_param, yolo_model_version):
     from ultralytics import YOLO
 
     model = YOLO(yolo_model_version).to(device_param)
-    model.eval()
     detection_model = model.model
     detection_model.eval()
     detection_model = detection_model.to(device_param)
@@ -101,102 +100,15 @@ def test_gradients_model_original(image_data, model_data):
 
 
 @pytest.fixture(scope="function")
-def dataset_classes():
-    # COCO classes
-    CLASSES = [
-        "N/A",
-        "person",
-        "bicycle",
-        "car",
-        "motorcycle",
-        "airplane",
-        "bus",
-        "train",
-        "truck",
-        "boat",
-        "traffic light",
-        "fire hydrant",
-        "N/A",
-        "stop sign",
-        "parking meter",
-        "bench",
-        "bird",
-        "cat",
-        "dog",
-        "horse",
-        "sheep",
-        "cow",
-        "elephant",
-        "bear",
-        "zebra",
-        "giraffe",
-        "N/A",
-        "backpack",
-        "umbrella",
-        "N/A",
-        "N/A",
-        "handbag",
-        "tie",
-        "suitcase",
-        "frisbee",
-        "skis",
-        "snowboard",
-        "sports ball",
-        "kite",
-        "baseball bat",
-        "baseball glove",
-        "skateboard",
-        "surfboard",
-        "tennis racket",
-        "bottle",
-        "N/A",
-        "wine glass",
-        "cup",
-        "fork",
-        "knife",
-        "spoon",
-        "bowl",
-        "banana",
-        "apple",
-        "sandwich",
-        "orange",
-        "broccoli",
-        "carrot",
-        "hot dog",
-        "pizza",
-        "donut",
-        "cake",
-        "chair",
-        "couch",
-        "potted plant",
-        "bed",
-        "N/A",
-        "dining table",
-        "N/A",
-        "N/A",
-        "toilet",
-        "N/A",
-        "tv",
-        "laptop",
-        "mouse",
-        "remote",
-        "keyboard",
-        "cell phone",
-        "microwave",
-        "oven",
-        "toaster",
-        "sink",
-        "refrigerator",
-        "N/A",
-        "book",
-        "clock",
-        "vase",
-        "scissors",
-        "teddy bear",
-        "hair drier",
-        "toothbrush",
-    ]
-    nb_classes = len(CLASSES)
+def dataset_classes(model_data):
+    # Ultralytics COCO heads use contiguous class IDs; derive names from the
+    # loaded model instead of the sparse torchvision-style table.
+    model, _, _ = model_data
+    names = model.names
+    nb_classes = len(names)
+    head = model.model.model[-1]
+    assert head.nc == nb_classes
+    CLASSES = [names[class_id] for class_id in range(nb_classes)]
     label_to_color = {
         "person": "r",
         "bicycle": "b",
@@ -232,10 +144,19 @@ def latent_extractor_data(dataset_classes, model_data, device_param):
     return latent_extractor
 
 
-def test_latent_extractor(image_data, dataset_classes, latent_extractor_data):
+def test_latent_extractor(
+    image_data, dataset_classes, latent_extractor_data, model_data
+):
     image, input_tensor = image_data
-    classes_names, _nb_classes, label_to_color = dataset_classes
+    classes_names, nb_classes, label_to_color = dataset_classes
+    _, _, yolo_model_version = model_data
     latent_extractor = latent_extractor_data
+
+    assert nb_classes == 80
+    assert classes_names[0] == "person"
+    assert classes_names[23] == "giraffe"
+    if yolo_model_version == "yolo26n.pt":
+        assert getattr(model_data[0].model.model[-1], "end2end", False)
 
     results = latent_extractor(input_tensor)
     print("Latent Data YOLO:", results)
@@ -247,6 +168,16 @@ def test_latent_extractor(image_data, dataset_classes, latent_extractor_data):
     assert isinstance(results[0], TorchMultiBoxTensor), (
         "Result should be a MultiBoxTensor"
     )
+    assert results[0].shape[-1] == 5 + nb_classes
+    assert torch.isfinite(results[0]).all()
+
+    if yolo_model_version == "yolo26n.pt":
+        probas = results[0][:, 5:]
+        assert probas.shape[-1] == nb_classes
+        torch.testing.assert_close(
+            probas.sum(dim=-1),
+            torch.ones(probas.shape[0], device=probas.device),
+        )
 
     filtered_results = results[0].filter(confidence=0.5)
     plot_image_detections(image, filtered_results, classes_names, label_to_color)
