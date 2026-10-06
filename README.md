@@ -95,8 +95,8 @@ Three formatters cover the two main YOLO output modes:
 | Class | Input format | When to use |
 |---|---|---|
 | `YoloResultBoxFormatter` | Ultralytics `Results` objects (XYXY, absolute px) | Default YOLO inference — `model(images)` returns `Results` |
-| `YoloOneToManyFormatter` | Inference tuple `(tensor, aux={"boxes", "scores", "feats"})`, CXCYWH in input-image pixels | YOLO 11 decoded detections before Results/NMS |
-| `YoloOneToOneFormatter` | Inference tuple `(tensor, aux={"one2many", "one2one"})`, XYXY in input-image pixels | YOLO 26 decoded, top-k detections before Results |
+| `YoloOneToManyFormatter` | Inference tuple `(tensor (B, 4+C, A), aux)`, CXCYWH in input-image pixels; `aux` is `{"boxes", "scores", "feats"}` or, for YOLO 26 heads with `end2end` disabled, `{"one2many", "one2one"}` | YOLO 11 (or YOLO 26 one-to-many) decoded detections before Results/NMS |
+| `YoloOneToOneFormatter` | Inference tuple `(tensor (B, K, 6), aux={"one2many", "one2one"})`, XYXY in input-image pixels | YOLO 26 decoded, top-k detections before Results |
 
 Corresponding wrappers:
 
@@ -105,6 +105,11 @@ Corresponding wrappers:
 | `YoloResultBoxesModelWrapper` | `YoloResultBoxFormatter` |
 | `Yolo11RawBoxesModelWrapper` | `YoloOneToManyFormatter` |
 | `Yolo26RawBoxesModelWrapper` | `YoloOneToOneFormatter` |
+
+> Ultralytics returns the YOLO 26 top-k layout only while the head's `end2end`
+> mode is enabled, which is off by default from Ultralytics 8.4.142. Set
+> `detection_model.end2end = True` before using `Yolo26RawBoxesModelWrapper`;
+> `YoloOneToOneFormatter` raises an explicit error otherwise.
 
 > All YOLO wrappers override `train(mode=False)` to prevent accidentally triggering Ultralytics dataset-loading side effects when Xplique calls `.eval()`.
 
@@ -270,7 +275,7 @@ Each latent extractor pair consists of:
 
 | LatentData class | Builder class | Model family | Notes |
 |---|---|---|---|
-| `LatentDataYolo` | `YoloExtractorBuilder` | Ultralytics YOLO | Stores main activation `x` + list of skip-connection tensors `y` |
+| `LatentDataYolo` | `YoloExtractorBuilder` | Ultralytics YOLO | Stores main activation `x` + list of skip-connection tensors `y`. `mode` selects the head branch (`ONE_TO_MANY`, or `ONE_TO_ONE` for YOLO 26), which is run explicitly on a copy of the model, independently of its `end2end` flag and the Ultralytics version |
 | `LatentDataDetr` | `DetrExtractorBuilder` | Facebook reference and HuggingFace Transformers 5 DETR | Extracts the final backbone level and supports variable-size inputs and masking. Facebook models are caller-supplied, typically through Torch Hub. |
 | `LatentDataRetinanet` | `RetinanetExtractorBuilder` | torchvision RetinaNet | Multi-scale FPN features as `OrderedDict`; `extraction_layer` selects which scale; perturbation rebatching repeats companion features and image metadata |
 | `LatentDataFasterRcnn` | `FasterRcnnExtractorBuilder` | torchvision Faster R-CNN | Multi-scale ResNet/FPN features; `extraction_layer` selects which scale |
