@@ -221,17 +221,34 @@ def test_yolo26_raw_wrapper_init():
     assert wrapper is not None
 
 
-def test_yolo_one_to_many_formatter_rejects_end2end_dict():
-    """YoloOneToManyFormatter must raise ValueError with a helpful hint when
-    predictions[1] is the end-to-end dict with one2many/one2one keys."""
+def test_yolo_one_to_many_formatter_rejects_end2end_detections():
+    """End-to-end (B, K, 6) detections are redirected to YoloOneToOneFormatter."""
     formatter = YoloOneToManyFormatter()
-
-    batch_size = 2
-    num_boxes = 10
-    num_classes = 80
-    raw_output = torch.rand(batch_size, 1, 4 + num_classes, num_boxes)
-    # Simulate the supported YOLO26 end-to-end auxiliary dictionary.
+    raw_output = torch.rand(2, 10, 6)
     predictions = (raw_output, {"one2many": None, "one2one": None})  # type: ignore
 
     with pytest.raises(ValueError, match="YoloOneToOneFormatter"):
         formatter.forward(predictions)  # type: ignore
+
+
+def test_yolo_one_to_many_formatter_accepts_end2end_capable_dict():
+    """A YOLO26 head with end2end disabled returns dense outputs with both branches."""
+    formatter = YoloOneToManyFormatter()
+    detection = torch.tensor([100.0, 200.0, 40.0, 80.0, 0.1, 0.8, 0.3])
+    raw_output = detection.reshape(1, 7, 1)
+
+    results = formatter((raw_output, {"one2many": None, "one2one": None}))
+
+    torch.testing.assert_close(
+        results[0], torch.tensor([[80.0, 160.0, 120.0, 240.0, 0.8, 0.1, 0.8, 0.3]])
+    )
+
+
+def test_yolo_one_to_one_formatter_rejects_one_to_many_detections():
+    """Dense outputs from a disabled end-to-end head get an actionable error."""
+    formatter = YoloOneToOneFormatter(nb_classes=80)
+    raw_output = torch.rand(1, 84, 8400)
+    predictions = (raw_output, {"one2many": None, "one2one": None})
+
+    with pytest.raises(ValueError, match="end2end = True"):
+        formatter(predictions)  # type: ignore

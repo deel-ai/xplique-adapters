@@ -5,10 +5,12 @@ Supported inputs:
 - ``YoloResultBoxFormatter``: a list of per-image ``Results`` objects with
     absolute XYXY boxes, confidence scores, and class IDs. Coordinates remain
     absolute XYXY; class IDs are converted to one-hot probabilities.
-- ``YoloOneToManyFormatter``: raw tuple output with normalized CXCYWH boxes
-    and per-class probabilities. Boxes are converted to normalized XYXY.
-- ``YoloOneToOneFormatter``: raw tuple output with normalized XYXY boxes,
-    scores, and class IDs. Class IDs are converted to one-hot probabilities.
+- ``YoloOneToManyFormatter``: inference tuple output with decoded CXCYWH
+    boxes in input-image pixels and per-class probabilities. Boxes are
+    converted to XYXY pixels.
+- ``YoloOneToOneFormatter``: end-to-end inference tuple output with XYXY boxes
+    in input-image pixels, scores, and class IDs. Class IDs are converted to
+    one-hot probabilities.
 
 Each formatter returns one ``TorchMultiBoxTensor`` per image, combining box
 coordinates, detection scores, and class probabilities.
@@ -32,6 +34,20 @@ from xplique.utils_functions.object_detection.torch.box_formatter import (
 from xplique.utils_functions.object_detection.torch.multi_box_tensor import (
     TorchMultiBoxTensor,
 )
+
+_ONE_TO_MANY_AUX_KEYS = {"boxes", "scores", "feats"}
+_END_TO_END_AUX_KEYS = {"one2many", "one2one"}
+
+
+def _is_one_to_one_layout(detections: torch.Tensor) -> bool:
+    """
+    Return whether ``detections`` has the end-to-end ``(B, K, 6)`` layout.
+
+    One-to-many outputs are ``(B, 4 + C, A)`` (optionally with a singleton
+    second axis); their last axis counts anchors, which is never 6 for a valid
+    YOLO input size.
+    """
+    return detections.ndim == 3 and detections.shape[-1] == 6
 
 
 class YoloResultBoxFormatter(TorchBaseBoxFormatter):
@@ -122,7 +138,9 @@ class YoloOneToManyFormatter(TorchBaseBoxFormatter):
             batch, 1, 4 + classes, num_boxes). The first four values are
             decoded CXCYWH coordinates in input-image pixels, followed by
             class probabilities. The auxiliary dict has exactly the keys
-            ``{"boxes", "scores", "feats"}``.
+            ``{"boxes", "scores", "feats"}``, or ``{"one2many", "one2one"}``
+            when an end-to-end capable head (e.g. YOLO26 with ``end2end``
+            disabled) returns its one-to-many detections.
 
         Returns
         -------
@@ -153,17 +171,17 @@ class YoloOneToManyFormatter(TorchBaseBoxFormatter):
                 f"{{'boxes', 'scores', 'feats'}}, got {type(aux)}"
             )
         keys = set(aux)
-        if keys == {"one2many", "one2one"}:
-            raise ValueError(
-                "YoloOneToManyFormatter received an end-to-end auxiliary "
-                "dictionary with keys {'one2many', 'one2one'}. "
-                "Use YoloOneToOneFormatter instead."
-            )
-        if keys != {"boxes", "scores", "feats"}:
+        if keys not in (_ONE_TO_MANY_AUX_KEYS, _END_TO_END_AUX_KEYS):
             raise ValueError(
                 "YoloOneToManyFormatter expects predictions[1] to be an auxiliary "
-                "dictionary with exactly the keys {'boxes', 'scores', 'feats'}; "
-                f"got {sorted(keys)}."
+                "dictionary with exactly the keys {'boxes', 'scores', 'feats'} "
+                f"or {{'one2many', 'one2one'}}; got {sorted(keys)}."
+            )
+        if keys == _END_TO_END_AUX_KEYS and _is_one_to_one_layout(predictions[0]):
+            raise ValueError(
+                "YoloOneToManyFormatter received end-to-end (B, K, 6) detections. "
+                "Use YoloOneToOneFormatter instead, or disable the head's "
+                "end2end mode to obtain one-to-many outputs."
             )
         nb_preds = len(predictions[0])
 
@@ -214,7 +232,9 @@ class YoloOneToOneFormatter(TorchBaseBoxFormatter):
             Tuple containing (detection_tensor, auxiliary_data) where
             detection_tensor has shape (batch, num_boxes, 6), with absolute
             XYXY coordinates, score, and class ID per detection. The auxiliary
-            dict has exactly the keys ``{"one2many", "one2one"}``.
+            dict has exactly the keys ``{"one2many", "one2one"}``. Ultralytics
+            produces this layout only while the head's ``end2end`` mode is
+            enabled, which is off by default from Ultralytics 8.4.142.
 
         Returns
         -------
@@ -244,11 +264,19 @@ class YoloOneToOneFormatter(TorchBaseBoxFormatter):
                 "predictions[1] should be an auxiliary dict with keys "
                 f"{{'one2many', 'one2one'}}, got {type(aux)}"
             )
-        if set(aux) != {"one2many", "one2one"}:
+        if set(aux) != _END_TO_END_AUX_KEYS:
             raise ValueError(
                 "YoloOneToOneFormatter expects predictions[1] to be an auxiliary "
                 "dictionary with exactly the keys {'one2many', 'one2one'}; "
                 f"got {sorted(aux)}."
+            )
+        if not _is_one_to_one_layout(predictions[0]):
+            raise ValueError(
+                "YoloOneToOneFormatter expects end-to-end detections of shape "
+                f"(batch, num_boxes, 6), got {tuple(predictions[0].shape)}. "
+                "The head returned one-to-many outputs: enable end-to-end "
+                "inference (e.g. `model.end2end = True`) or use "
+                "YoloOneToManyFormatter."
             )
         nb_preds = len(predictions[0])
 
