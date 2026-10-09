@@ -1,5 +1,8 @@
+import copy
 import os
 import pprint
+import time
+from urllib.error import HTTPError, URLError
 
 import numpy as np
 import pytest
@@ -63,15 +66,84 @@ def test_image_size(image_data):
     assert image.size == expected_size
 
 
+def _load_pretrained_detr():
+    """Acquire a pinned reference model, retrying only transient network failures."""
+    for attempt in range(3):
+        try:
+            return torch.hub.load(
+                "facebookresearch/detr:29901c51d7fe8712168b8d0d64351170bc0f83e0",
+                "detr_resnet50",
+                pretrained=True,
+                trust_repo=True,
+                skip_validation=True,
+            )
+        except (URLError, TimeoutError) as error:
+            if isinstance(error, HTTPError) and error.code not in {
+                429,
+                500,
+                502,
+                503,
+                504,
+            }:
+                raise
+            if attempt == 2:
+                raise
+            time.sleep(2**attempt)
+
+
+@pytest.fixture(scope="session")
+def pretrained_detr():
+    return _load_pretrained_detr().eval()
+
+
 @pytest.fixture(scope="function")
-def model_data(image_data, device_param):
+def model_data(image_data, device_param, pretrained_detr):
     _, input_tensor = image_data
-    model = torch.hub.load(
-        "facebookresearch/detr", "detr_resnet50", pretrained=True
-    ).to(device_param)
-    model.eval()
+    # Builders attach g()/h(), so each test owns a fresh copy of the cached model.
+    model = copy.deepcopy(pretrained_detr).to(device_param)
     processed_results = model(input_tensor)
     return model, processed_results
+
+
+def test_reference_model_download_retries_transient_error(monkeypatch):
+    model = torch.nn.Identity()
+    calls = []
+    waits = []
+
+    def load(*args, **kwargs):
+        calls.append((args, kwargs))
+        if len(calls) < 3:
+            raise HTTPError("https://github.com", 504, "Gateway Time-out", {}, None)
+        return model
+
+    monkeypatch.setattr(torch.hub, "load", load)
+    monkeypatch.setattr(time, "sleep", waits.append)
+
+    assert _load_pretrained_detr() is model
+    assert len(calls) == 3
+    assert waits == [1, 2]
+    assert calls[0][0][0].endswith(":29901c51d7fe8712168b8d0d64351170bc0f83e0")
+    assert calls[0][1]["skip_validation"] is True
+
+
+@pytest.mark.parametrize("status, expected_attempts", [(404, 1), (504, 3)])
+def test_reference_model_download_propagates_failure(
+    monkeypatch, status, expected_attempts
+):
+    calls = []
+    error = HTTPError("https://github.com", status, "Download failed", {}, None)
+
+    def load(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise error
+
+    monkeypatch.setattr(torch.hub, "load", load)
+    monkeypatch.setattr(time, "sleep", lambda delay: None)
+
+    with pytest.raises(HTTPError) as caught:
+        _load_pretrained_detr()
+    assert caught.value is error
+    assert len(calls) == expected_attempts
 
 
 def test_model_outputs(model_data):
