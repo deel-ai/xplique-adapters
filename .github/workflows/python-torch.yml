@@ -63,6 +63,11 @@ jobs:
           . .venv/bin/activate
           uv pip install --upgrade pip
           uv pip install tox tox-uv
+      - name: Cache pinned detection models
+        uses: actions/cache@v5
+        with:
+          path: .tox/cache/torch/hub
+          key: torch-hub-${{ runner.os }}-detr-29901c51d7fe8712168b8d0d64351170bc0f83e0
       - name: Test with tox (${{ matrix.toxenv }})
         run: |
           . .venv/bin/activate
