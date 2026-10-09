@@ -166,7 +166,9 @@ The complete CRAFT example is available in
 
 ##### HuggingFace Transformers DETR
 
-Install the `detr` extra, which provides `transformers>=5,<6`:
+Install the `detr` extra, which provides `transformers>=5,<6` and
+`torch>=2.7,<2.11`. The DETR-specific Torch minimum ensures that Transformers'
+accelerator detection also works on CPU-only installations:
 
 ```bash
 pip install "xplique-adapters[detr]"
