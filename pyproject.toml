@@ -45,6 +45,9 @@ torchvision = [
 ]
 detr = [
   "xplique-adapters[torchvision]",
+  # Recent Transformers releases query the accelerator even on CPU. Torch 2.6
+  # raises in that case; Torch 2.7 returns None as expected by Transformers.
+  "torch>=2.7,<2.11",
   "transformers>=5,<6",
 ]
 yolo = [

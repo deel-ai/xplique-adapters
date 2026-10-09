@@ -266,20 +266,7 @@ def test_real_huggingface_detr_split_preserves_outputs_and_gradients():
         num_queries=3,
         num_labels=2,
     )
-    try:
-        model = transformers.DetrForObjectDetection(config).eval()
-    except ModuleNotFoundError as error:
-        cause = error
-        while cause is not None:
-            if (
-                isinstance(cause, (AttributeError, RuntimeError))
-                and "accelerator" in str(cause).lower()
-            ):
-                pytest.skip(
-                    "Transformers accelerator detection fails on this CPU-only Torch environment"
-                )
-            cause = cause.__cause__
-        raise
+    model = transformers.DetrForObjectDetection(config).eval()
     samples = torch.rand(1, 3, 32, 40, requires_grad=True)
     expected = model(samples)
     extractor = DetrExtractorBuilder.build(
@@ -293,6 +280,8 @@ def test_real_huggingface_detr_split_preserves_outputs_and_gradients():
     assert torch.allclose(actual["pred_boxes"], expected.pred_boxes)
     actual["logits"].sum().backward()
     assert samples.grad is not None
+    assert torch.isfinite(samples.grad).all()
+    assert samples.grad.abs().sum() > 0
 
 
 def test_rebatching_is_materialized_and_supports_two_directions():
