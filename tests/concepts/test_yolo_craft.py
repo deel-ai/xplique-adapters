@@ -303,6 +303,64 @@ def test_yolo26_example_one_to_one_cpu_path():
     torch.testing.assert_close(probas.sum(dim=-1), torch.ones(len(probas)))
 
 
+@pytest.mark.parametrize("end2end", [True, False])
+def test_yolo26_fused_head_preserves_outputs_and_validates_branches(end2end):
+    image = torch.rand(1, 3, 64, 64)
+    model, _ = _yolo26_reference(end2end, image)
+    model.fuse(verbose=False)
+    head = model.model[-1]
+    mode = YoloExtractorMode.ONE_TO_ONE if end2end else YoloExtractorMode.ONE_TO_MANY
+    formatter = (
+        YoloOneToOneFormatter(nb_classes=head.nc)
+        if end2end
+        else YoloOneToManyFormatter()
+    )
+    with torch.no_grad():
+        expected = formatter(model(image))[0]
+    extractor = YoloExtractorBuilder.build(
+        model,
+        extraction_layer=10,
+        nb_classes=head.nc,
+        mode=mode,
+        device="cpu",
+    )
+    actual = _assert_input_gradients(extractor, image, nb_columns=5)
+    torch.testing.assert_close(actual, expected)
+
+    if head.cv2 is None:
+        with pytest.raises(ValueError, match="removed.*fused"):
+            YoloExtractorBuilder.build(model, extraction_layer=10, device="cpu")
+    if getattr(head, "one2one_cv2", None) is None:
+        with pytest.raises(ValueError, match="one-to-one branches"):
+            YoloExtractorBuilder.build(
+                model,
+                extraction_layer=10,
+                nb_classes=head.nc,
+                mode=YoloExtractorMode.ONE_TO_ONE,
+                device="cpu",
+            )
+
+
+def test_yolo26_extractor_preserves_caller_training_state():
+    image = torch.rand(1, 3, 64, 64)
+    model, _ = _yolo26_reference(False, image)
+    model.train()
+    # Mixed modes must also survive construction and attribution.
+    model.model[0].eval()
+    original_modes = [module.training for module in model.modules()]
+    extractor = YoloExtractorBuilder.build(
+        model,
+        extraction_layer=10,
+        nb_classes=model.model[-1].nc,
+        mode=YoloExtractorMode.ONE_TO_ONE,
+        device="cpu",
+    )
+    _assert_input_gradients(extractor, image, nb_columns=5)
+    assert [module.training for module in model.modules()] == original_modes
+    assert not hasattr(model, "g") and not hasattr(model, "h")
+    assert model.model[-1].end2end is False
+
+
 def test_latent_extractor_gradients(image_data, latent_extractor_data):
     _image, input_tensor = image_data
     latent_extractor = latent_extractor_data
