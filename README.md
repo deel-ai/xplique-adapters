@@ -275,7 +275,7 @@ Each latent extractor pair consists of:
 
 | LatentData class | Builder class | Model family | Notes |
 |---|---|---|---|
-| `LatentDataYolo` | `YoloExtractorBuilder` | Ultralytics YOLO | Stores main activation `x` + list of skip-connection tensors `y`. `mode` selects the head branch (`ONE_TO_MANY`, or `ONE_TO_ONE` for YOLO 26), which is run explicitly on a copy of the model, independently of its `end2end` flag and the Ultralytics version |
+| `LatentDataYolo` | `YoloExtractorBuilder` | Ultralytics YOLO | Stores main activation `x` + list of skip-connection tensors `y`. `mode` selects the head branch (`ONE_TO_MANY`, or `ONE_TO_ONE` for YOLO 26), which is run explicitly on a copy of the model, independently of its `end2end` flag within the supported Ultralytics range |
 | `LatentDataDetr` | `DetrExtractorBuilder` | Facebook reference and HuggingFace Transformers 5 DETR | Extracts the final backbone level and supports variable-size inputs and masking. Facebook models are caller-supplied, typically through Torch Hub. |
 | `LatentDataRetinanet` | `RetinanetExtractorBuilder` | torchvision RetinaNet | Multi-scale FPN features as `OrderedDict`; `extraction_layer` selects which scale; perturbation rebatching repeats companion features and image metadata |
 | `LatentDataFasterRcnn` | `FasterRcnnExtractorBuilder` | torchvision Faster R-CNN | Multi-scale ResNet/FPN features; `extraction_layer` selects which scale |
