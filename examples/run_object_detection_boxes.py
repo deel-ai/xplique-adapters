@@ -12,7 +12,6 @@ from PIL import Image
 from xplique.plots import plot_image_detections
 from xplique.utils_functions.object_detection.base.box_manager import BoxFormat, BoxType
 
-
 COCO_CLASSES = [
     "N/A", "person", "bicycle", "car", "motorcycle", "airplane", "bus",
     "train", "truck", "boat", "traffic light", "fire hydrant", "N/A",
@@ -41,7 +40,7 @@ CLASS_COLORS = {
 
 MODELS = (
     "detr", "fasterrcnn", "retinanet", "keras_retinanet", "fcos", "ssd",
-    "yolo11", "yolo26",
+    "yolo11", "yolo26", "yolox",
 )
 
 
@@ -54,7 +53,7 @@ def get_label_to_color(class_names):
     }
 
 
-def load_model(name, device):
+def load_model(name, device, yolox_checkpoint=None):
     if name == "detr":
         model = torch.hub.load("facebookresearch/detr", "detr_resnet50", pretrained=True)
         return model.to(device).eval(), None, (800, 800)
@@ -87,6 +86,22 @@ def load_model(name, device):
         )
         weights = SSDLite320_MobileNet_V3_Large_Weights.COCO_V1
         return ssdlite320_mobilenet_v3_large(weights=weights).to(device).eval(), weights, (320, 320)
+    if name == "yolox":
+        try:
+            from yolox.models.build import yolox_m
+        except ImportError as error:
+            raise ImportError(
+                "YOLOX and its runtime dependencies are required. "
+                "Install the xplique-adapters[yolox] extra; see README.md."
+            ) from error
+        if yolox_checkpoint is not None and not os.path.isfile(yolox_checkpoint):
+            raise FileNotFoundError(f"YOLOX checkpoint not found: {yolox_checkpoint}")
+        model = yolox_m(pretrained=yolox_checkpoint is None, device=str(device))
+        if yolox_checkpoint is not None:
+            checkpoint = torch.load(yolox_checkpoint, map_location=device, weights_only=True)
+            state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+            model.load_state_dict(state_dict)
+        return model.eval(), None, (640, 640)
     if name in ("yolo11", "yolo26"):
         from ultralytics import YOLO
         model = YOLO(f"{name}n.pt", verbose=False)
@@ -124,7 +139,13 @@ def run_model(name, model, image, weights, image_size, device):
         tensor = weights.transforms()(tensor)
     tensor = tensor.to(device)
 
-    if name in ("yolo11", "yolo26"):
+    if name == "yolox":
+        tensor = tensor * 255.0
+        from xplique_adapters.object_detection.torch import YoloXBoxesModelWrapper
+
+        result = YoloXBoxesModelWrapper(model)(tensor)[0]
+        class_names = COCO_CLASSES_YOLO
+    elif name in ("yolo11", "yolo26"):
         from xplique_adapters.object_detection.torch.yolo_wrappers import YoloResultBoxesModelWrapper
         result = YoloResultBoxesModelWrapper(model)(tensor)[0]
         class_names = COCO_CLASSES_YOLO
@@ -145,6 +166,12 @@ def main():
     parser.add_argument("--output-dir", default="object_detection_boxes")
     parser.add_argument("--confidence", type=float, default=0.5)
     parser.add_argument("--models", nargs="+", choices=MODELS, default=MODELS)
+    parser.add_argument(
+        "--yolox-checkpoint",
+        default=None,
+        help=("Optional local YOLOX-m checkpoint; default downloads and caches "
+              "the pretrained weights"),
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.image):
@@ -156,7 +183,9 @@ def main():
 
     for name in args.models:
         print(f"[{name}] loading model")
-        model, weights, image_size = load_model(name, device)
+        model, weights, image_size = load_model(
+            name, device, yolox_checkpoint=args.yolox_checkpoint
+        )
         display_image, detections, class_names, normalized = run_model(
             name, model, image, weights, image_size, device
         )

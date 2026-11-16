@@ -9,7 +9,6 @@ import torch
 import torchvision.transforms as T
 from PIL import Image
 from pycocotools.coco import COCO
-
 from horama import maco, plot_maco
 
 import xplique
@@ -19,6 +18,8 @@ from xplique.plots import plot_image_detections
 from xplique.utils_functions.object_detection import _box_iou
 from xplique.utils_functions.object_detection.base.box_manager import BoxFormat, NumpyBoxManager
 import tensorflow as tf
+
+from xplique_adapters.concepts.torch.latent_data_yolox import YoloXExtractorBuilder
 
 # Prevent TensorFlow from pre-allocating all GPU memory
 _tf_gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -104,6 +105,20 @@ MODEL_CONFIGS = {
         "extraction_layer": 10,
         "batch_size": 1,
     },
+    "yolox": {
+        "image_size": (640, 640),
+        "use_weights_transform": False,
+        "custom_transform": "yolox",
+        "box_format": BoxFormat.XYXY,
+        "normalized": False,
+        "confidence": 0.1,
+        "default_num_images": 100,
+        "default_start_offset": 0,
+        "extraction_layer": -1,
+        "batch_size": 1,
+        "checkpoint_path": None,
+        "default_nmf_type": "oc_semi_nmf",
+    },
 }
 
 COCO_CLASSES = [
@@ -139,7 +154,7 @@ def parse_args():
     parser.add_argument("--model", type=str, required=True,
                         choices=[
                             "detr", "retinanet", "fasterrcnn",
-                             "fcos", "ssd", "yolo11", "yolo26"
+                            "fcos", "ssd", "yolo11", "yolo26", "yolox"
                         ],
                         help="Model to use")
     parser.add_argument("--class_name", type=str, default="giraffe",
@@ -150,7 +165,7 @@ def parse_args():
                         help="Starting index in COCO dataset (default: model-specific)")
     parser.add_argument("--num_concepts", type=int, default=10,
                         help="Number of concepts for CRAFT")
-    parser.add_argument("--nmf_type", type=str, default="sklearn",
+    parser.add_argument("--nmf_type", type=str, default=None,
                         choices=["sklearn", "oc_semi_nmf"],
                         help="NMF factorizer type")
     parser.add_argument("--extraction_layer", type=int, default=None,
@@ -192,6 +207,12 @@ def parse_args():
                             "Confidence threshold for filtering boxes "
                             "(overrides model defaults)"
                         ))
+    parser.add_argument(
+        "--yolox-checkpoint",
+        default=None,
+        help=("Optional local YOLOX-m checkpoint; default downloads and caches "
+              "the pretrained weights"),
+    )
     parser.add_argument("--detect-only", action="store_true",
                         help="Only generate detection visualizations, skip CRAFT analysis")
     parser.add_argument("--skip-importance", action="store_true",
@@ -278,6 +299,24 @@ def load_model(model_name, config, device, framework="torch"):
         model.eval()
         model = model.to(device)
         return model, weights
+
+    if model_name == "yolox":
+        try:
+            from yolox.models.build import yolox_m
+        except ImportError as error:
+            raise ImportError(
+                "YOLOX and its runtime dependencies are required. "
+                "Install the xplique-adapters[yolox] extra; see README.md."
+            ) from error
+        checkpoint_path = config.get("checkpoint_path")
+        if checkpoint_path is not None and not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(f"YOLOX checkpoint not found: {checkpoint_path}")
+        model = yolox_m(pretrained=checkpoint_path is None, device=str(device))
+        if checkpoint_path is not None:
+            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+            state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+            model.load_state_dict(state_dict)
+        return model.eval(), None
 
     if model_name in ["yolo11", "yolo26"]:
         from ultralytics import YOLO
@@ -368,6 +407,14 @@ def build_latent_extractor(model_name, model, config, device, framework="torch",
             mode=mode,
         )
 
+    if model_name == "yolox":
+        return YoloXExtractorBuilder.build(
+            model,
+            extraction_layer=config["extraction_layer"],
+            batch_size=config["batch_size"],
+            device=str(device),
+        )
+
 
 def preprocess_images(raw_images, model_name, config, weights=None, framework="torch"):
     # pylint: disable=import-outside-toplevel
@@ -395,18 +442,17 @@ def preprocess_images(raw_images, model_name, config, weights=None, framework="t
             input_tensors = raw_images
         input_tensors = [preprocess(img) for img in input_tensors]
         input_tensor = torch.stack(input_tensors, dim=0)
-    elif model_name in ["yolo11", "yolo26"]:
+    elif model_name in ["yolo11", "yolo26", "yolox"]:
         if config["image_size"] is not None:
-            transform = T.Compose([
-                T.Resize(config["image_size"]),
-                T.ToTensor()
-            ])
+            transform = T.Compose([T.Resize(config["image_size"]), T.ToTensor()])
         else:
             transform = T.Compose([
                 T.ToTensor()
             ])
         input_tensors = [transform(img).unsqueeze(0) for img in raw_images]
         input_tensor = torch.cat(input_tensors, dim=0)
+        if model_name == "yolox":
+            input_tensor = input_tensor * 255.0
     else:
         # DETR and similar models
         if config["image_size"] is not None:
@@ -432,6 +478,8 @@ def get_class_names(model_name, model, framework="torch"):
         # TensorFlow RetinaNet uses PASCAL VOC classes
         return PASCAL_VOC_CLASSES
     # PyTorch models
+    if model_name == "yolox":
+        return [name for name in COCO_CLASSES if name != "N/A"]
     if model_name in ["yolo11", "yolo26"]:
         names = model.names
         return [names[class_id] for class_id in range(len(names))]
@@ -491,7 +539,10 @@ def plot_concepts_feature_viz(craft, _input_tensor, indices_to_plot, device,
 def run_craft(args, output_dir=None, device_override=None):
     # pylint: disable=too-many-branches,too-many-statements
     """Main function to run object detection holistic CRAFT analysis."""
-    config = MODEL_CONFIGS[args.model]
+    config = MODEL_CONFIGS[args.model].copy()
+    if args.model == "yolox":
+        config["checkpoint_path"] = args.yolox_checkpoint
+    nmf_type = args.nmf_type or config.get("default_nmf_type", "sklearn")
 
     # # Override config for TensorFlow framework
     # if args.framework == "tf" and args.model == "retinanet":
@@ -516,7 +567,7 @@ def run_craft(args, output_dir=None, device_override=None):
     if args.confidence is not None:
         config["confidence"] = args.confidence
 
-    nmf_suffix = "" if args.nmf_type == "sklearn" else f"_{args.nmf_type}"
+    nmf_suffix = "" if nmf_type == "sklearn" else f"_{nmf_type}"
     confidence_suffix = (
         "" if args.confidence is None else f"_conf{args.confidence}"
     )
@@ -727,7 +778,7 @@ def run_craft(args, output_dir=None, device_override=None):
     print("7. Initializing and Running CRAFT on All Images")
     print("="*80)
 
-    factorizer = create_factorizer(args.nmf_type, args.num_concepts, device)
+    factorizer = create_factorizer(nmf_type, args.num_concepts, device)
 
     # Select appropriate CRAFT class based on framework
     if args.framework == "tf":
