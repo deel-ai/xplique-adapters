@@ -32,7 +32,8 @@ Install only the extras you need:
 | `detr` | `transformers>=5,<6` | DETR (HuggingFace) |
 | `torchvision` | `torchvision` | FCOS, RetinaNet, Faster R-CNN, SSD |
 | `retinanet` | `keras-cv` | TensorFlow RetinaNet |
-| `all` | all of the above | everything |
+| `yolox` | `yolox` from [Megvii-BaseDetection/YOLOX](https://github.com/Megvii-BaseDetection/YOLOX/tree/6ddff4824372906469a7fae2dc3206c7aa4bbaee), pinned to commit `6ddff48` | YOLOX models |
+| `all` | all standard extras | all backends that support standard isolated installation |
 
 The Facebook reference DETR implementation is not installed as a package extra. Install
 the `torchvision` extra for its PyTorch dependencies, then load the upstream model through
@@ -42,6 +43,22 @@ cache by the caller.
 ```bash
 pip install "xplique-adapters[yolo,torchvision] @ git+https://..."
 ```
+
+The `yolox` extra is separate from `all`. It installs the Python distribution
+`yolox` from the official [Megvii-BaseDetection/YOLOX repository](https://github.com/Megvii-BaseDetection/YOLOX)
+at pinned commit `6ddff48`, not from the PyPI source archive. The PyPI archive
+pins `onnxruntime==1.8.0`, which has wheels only through CPython 3.9. The pinned
+source requires `onnx>=1.13.0` and `onnx-simplifier==0.4.10`; uv overrides the
+latter with `onnx-simplifier>=0.5.0` and builds YOLOX without isolation so the
+PyTorch dependency is available during the build:
+
+```bash
+UV_PROJECT_ENVIRONMENT=xplique-yolox-venv uv sync --extra yolox --no-dev
+```
+
+YOLOX-M's official pretrained checkpoint is downloaded automatically and cached
+by PyTorch on first use. To use different local weights, pass their path with
+`--yolox-checkpoint`.
 
 ---
 
@@ -72,6 +89,7 @@ determined by the formatter it uses.
 | DETR | Model output object | Raw model predictions; formatter decodes scores and boxes | DETR has no anchor/NMS pipeline like YOLO |
 | Torchvision detectors | List of dictionaries | Post-processed detections, typically after thresholding/NMS | Standard torchvision inference output (`boxes`, `scores`, `labels`) |
 | KerasCV RetinaNet | Decoded prediction dictionary | Decoded predictions; NMS depends on the producing code | The adapter receives `boxes`, `confidence`, and `classes` tensors |
+| YOLOX (`YoloXBoxesModelWrapper`) | Decoded prediction tensor | Decoded boxes and scores, before NMS | Formats native YOLOX model output for Xplique |
 
 YOLO is the only family exposing both public post-processed results and raw
 internal model outputs. The wrapper must therefore match the selected YOLO
@@ -259,6 +277,27 @@ wrapper = RetinaNetBoxesModelWrapper(
 )
 ```
 
+### YOLOX (PyTorch)
+
+`YoloXBoxesModelWrapper` formats decoded YOLOX predictions for object-detection
+methods. `YoloXExtractorBuilder` splits the model at an FPN feature level for
+CRAFT. See the Installation section for the separate `yolox` extra and its
+pretrained-weight caching behavior.
+
+```python
+from yolox.models.build import yolox_m
+
+from xplique_adapters.concepts.torch.latent_data_yolox import YoloXExtractorBuilder
+from xplique_adapters.object_detection.torch import YoloXBoxesModelWrapper
+
+device = "cuda"
+model = yolox_m(pretrained=True, device=device).eval()
+wrapper = YoloXBoxesModelWrapper(model)
+latent_extractor = YoloXExtractorBuilder.build(
+    model, device=device, extraction_layer=-1
+)
+```
+
 ---
 
 ## Concepts / latent extractors
@@ -281,6 +320,7 @@ Each latent extractor pair consists of:
 | `LatentDataFasterRcnn` | `FasterRcnnExtractorBuilder` | torchvision Faster R-CNN | Multi-scale ResNet/FPN features; `extraction_layer` selects which scale |
 | `LatentDataFcos` | `FcosExtractorBuilder` | torchvision FCOS | Multi-scale FPN features; `extraction_layer` selects which scale |
 | `LatentDataSSD` | `SSDExtractorBuilder` | torchvision SSD (MobileNetV3) | Backbone features as dict; `extraction_layer` selects which feature map |
+| `LatentDataYoloX` | `YoloXExtractorBuilder` | YOLOX | Stores all FPN outputs; `extraction_layer` selects the feature level exposed to CRAFT |
 
 All `LatentData` classes expose:
 - `get_activations(as_numpy, keep_gradients)` — returns activations in `(N, H, W, C)` format.
@@ -314,7 +354,7 @@ Original code is licensed under the MIT License. Some model-specific latent
 adapters contain modified third-party code and are subject to their respective
 upstream licenses:
 
-- DETR and TensorFlow RetinaNet adapters: Apache License 2.0
+- DETR, YOLOX and TensorFlow RetinaNet adapters: Apache License 2.0
 - Torchvision RetinaNet, FCOS, SSD, and Faster R-CNN adapters: BSD 3-Clause
     License
 - YOLO adapter: GNU Affero General Public License v3.0
