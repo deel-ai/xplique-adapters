@@ -28,8 +28,6 @@ from xplique.utils_functions.common.torch.gradients_check import check_model_gra
 from xplique_adapters.concepts.torch.latent_data_yolox import YoloXExtractorBuilder
 from xplique_adapters.object_detection.torch.yolox_wrappers import YoloXBoxesModelWrapper
 
-from yolox_example import load_yolox_model, prepare_yolox_image
-
 # ==============================================================================
 # Model Configurations
 # ==============================================================================
@@ -275,7 +273,19 @@ def load_model(model_name, config, device):
         return model, None
 
     elif model_name == "yolox":
-        return load_yolox_model(device, config.get("checkpoint_path")), None
+        try:
+            from yolox.models.build import yolox_m
+        except ImportError as error:
+            raise ImportError("Install upstream YOLOX separately; see README.md.") from error
+
+        checkpoint_path = config.get("checkpoint_path")
+        if checkpoint_path is not None and not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(f"YOLOX checkpoint not found: {checkpoint_path}")
+        model = yolox_m(pretrained=checkpoint_path is None, device=str(device))
+        if checkpoint_path is not None:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            model.load_state_dict(checkpoint.get("model", checkpoint))
+        return model.eval(), None
 
     else:
         raise ValueError(f"Unknown model: {model_name}")
@@ -367,8 +377,13 @@ def load_and_preprocess_image(image_path, model_name, config, weights, device):
 
     image = Image.open(image_path).convert('RGB')
     if model_name == "yolox":
-        tensor, display = prepare_yolox_image(image, config["image_size"])
-        return display, tensor.flip(0).unsqueeze(0) / 255.0, tensor.unsqueeze(0).to(device)
+        from yolox.data.data_augment import preproc
+
+        rgb = np.asarray(image)
+        bgr_chw, _ = preproc(rgb[..., ::-1], config["image_size"])
+        tensor = torch.from_numpy(bgr_chw).unsqueeze(0)
+        display = Image.fromarray(bgr_chw[::-1].transpose(1, 2, 0).astype(np.uint8))
+        return display, tensor.flip(1) / 255.0, tensor.to(device)
 
     # Resize if needed
     if config["image_size"] is not None:

@@ -12,8 +12,6 @@ from PIL import Image
 from xplique.plots import plot_image_detections
 from xplique.utils_functions.object_detection.base.box_manager import BoxFormat, BoxType
 
-from yolox_example import load_yolox_model, prepare_yolox_image
-
 COCO_CLASSES = [
     "N/A", "person", "bicycle", "car", "motorcycle", "airplane", "bus",
     "train", "truck", "boat", "traffic light", "fire hydrant", "N/A",
@@ -90,7 +88,18 @@ def load_model(name, device, yolox_checkpoint=None):
         weights = SSDLite320_MobileNet_V3_Large_Weights.COCO_V1
         return ssdlite320_mobilenet_v3_large(weights=weights).to(device).eval(), weights, (320, 320)
     if name == "yolox":
-        return load_yolox_model(device, yolox_checkpoint), None, (640, 640)
+        try:
+            from yolox.models.build import yolox_m
+        except ImportError as error:
+            raise ImportError("Install upstream YOLOX separately; see README.md.") from error
+
+        if yolox_checkpoint is not None and not os.path.isfile(yolox_checkpoint):
+            raise FileNotFoundError(f"YOLOX checkpoint not found: {yolox_checkpoint}")
+        model = yolox_m(pretrained=yolox_checkpoint is None, device=str(device))
+        if yolox_checkpoint is not None:
+            checkpoint = torch.load(yolox_checkpoint, map_location="cpu", weights_only=True)
+            model.load_state_dict(checkpoint.get("model", checkpoint))
+        return model.eval(), None, (640, 640)
     if name in ("yolo11", "yolo26"):
         from ultralytics import YOLO
         model = YOLO(f"{name}n.pt", verbose=False)
@@ -103,8 +112,12 @@ def load_model(name, device, yolox_checkpoint=None):
 def run_model(name, model, image, weights, image_size, device):
     if name == "yolox":
         from xplique_adapters.object_detection.torch import YoloXBoxesModelWrapper
+        from yolox.data.data_augment import preproc
 
-        tensor, display_image = prepare_yolox_image(image, image_size)
+        rgb = np.asarray(image.convert("RGB"))
+        bgr_chw, _ = preproc(rgb[..., ::-1], image_size)
+        tensor = torch.from_numpy(bgr_chw)
+        display_image = Image.fromarray(bgr_chw[::-1].transpose(1, 2, 0).astype(np.uint8))
         with torch.no_grad():
             result = YoloXBoxesModelWrapper(model)(tensor.unsqueeze(0).to(device))[0]
         return display_image, result, COCO_CLASSES_YOLO, False

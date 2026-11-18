@@ -20,8 +20,6 @@ import tensorflow as tf
 
 from xplique_adapters.concepts.torch.latent_data_yolox import YoloXExtractorBuilder
 
-from yolox_example import load_yolox_model, prepare_yolox_image
-
 # Prevent TensorFlow from pre-allocating all GPU memory
 _tf_gpus = tf.config.experimental.list_physical_devices('GPU')
 for _gpu in _tf_gpus:
@@ -301,7 +299,19 @@ def load_model(model_name, config, device, framework="torch"):
         return model, weights
 
     if model_name == "yolox":
-        return load_yolox_model(device, config.get("checkpoint_path")), None
+        try:
+            from yolox.models.build import yolox_m
+        except ImportError as error:
+            raise ImportError("Install upstream YOLOX separately; see README.md.") from error
+
+        checkpoint_path = config.get("checkpoint_path")
+        if checkpoint_path is not None and not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(f"YOLOX checkpoint not found: {checkpoint_path}")
+        model = yolox_m(pretrained=checkpoint_path is None, device=str(device))
+        if checkpoint_path is not None:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            model.load_state_dict(checkpoint.get("model", checkpoint))
+        return model.eval(), None
 
     if model_name in ["yolo11", "yolo26"]:
         from ultralytics import YOLO
@@ -428,8 +438,11 @@ def preprocess_images(raw_images, model_name, config, weights=None, framework="t
         input_tensors = [preprocess(img) for img in input_tensors]
         input_tensor = torch.stack(input_tensors, dim=0)
     elif model_name == "yolox":
+        from yolox.data.data_augment import preproc
+
         input_tensor = torch.stack([
-            prepare_yolox_image(img, config["image_size"])[0] for img in raw_images
+            torch.from_numpy(preproc(np.asarray(img)[..., ::-1], config["image_size"])[0])
+            for img in raw_images
         ])
     elif model_name in ["yolo11", "yolo26"]:
         if config["image_size"] is not None:
@@ -744,7 +757,9 @@ def run_craft(args, output_dir=None, device_override=None):
     )
 
     if args.model == "yolox":
-        _, display_image = prepare_yolox_image(display_raw_image, config["image_size"])
+        # Show the same padded canvas the model saw, in RGB.
+        rgb = display_input_tensor[0].cpu().flip(0).permute(1, 2, 0)
+        display_image = Image.fromarray(rgb.to(torch.uint8).numpy())
     else:
         display_image = (
             display_raw_image.resize(config["image_size"])
