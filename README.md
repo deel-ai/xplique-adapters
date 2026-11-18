@@ -32,7 +32,6 @@ Install only the extras you need:
 | `detr` | `transformers>=5,<6` | DETR (HuggingFace) |
 | `torchvision` | `torchvision` | FCOS, RetinaNet, Faster R-CNN, SSD |
 | `retinanet` | `keras-cv` | TensorFlow RetinaNet |
-| `yolox` | `yolox` from [Megvii-BaseDetection/YOLOX](https://github.com/Megvii-BaseDetection/YOLOX/tree/6ddff4824372906469a7fae2dc3206c7aa4bbaee), pinned to commit `6ddff48` | YOLOX models |
 | `all` | all standard extras | all backends that support standard isolated installation |
 
 The Facebook reference DETR implementation is not installed as a package extra. Install
@@ -44,16 +43,26 @@ cache by the caller.
 pip install "xplique-adapters[yolo,torchvision] @ git+https://..."
 ```
 
-The `yolox` extra is separate from `all`. It installs the Python distribution
-`yolox` from the official [Megvii-BaseDetection/YOLOX repository](https://github.com/Megvii-BaseDetection/YOLOX)
-at pinned commit `6ddff48`, not from the PyPI source archive. The PyPI archive
+The YOLOX adapters use the `torch` extra and accept a caller-provided model.
+To run the YOLOX examples with the upstream model, install the pinned
+[Megvii-BaseDetection/YOLOX](https://github.com/Megvii-BaseDetection/YOLOX/tree/6ddff4824372906469a7fae2dc3206c7aa4bbaee)
+source separately from a checkout of this repository. The PyPI archive
 pins `onnxruntime==1.8.0`, which has wheels only through CPython 3.9. The pinned
 source requires `onnx>=1.13.0` and `onnx-simplifier==0.4.10`; uv overrides the
 latter with `onnx-simplifier>=0.5.0` and builds YOLOX without isolation so the
-PyTorch dependency is available during the build:
+PyTorch dependency is available during the build. The setup targets Linux and
+Python 3.12. It needs a C++ compiler for the upstream extension and the system
+libraries required by OpenCV (for example, `libgl1` on Ubuntu):
 
 ```bash
-UV_PROJECT_ENVIRONMENT=xplique-yolox-venv uv sync --extra yolox --no-dev
+uv venv --python 3.12 .venv-yolox
+source .venv-yolox/bin/activate
+uv pip install -e '.[torch]' setuptools wheel 'matplotlib<3.11'
+uv pip install --no-build-isolation-package yolox \
+  --overrides requirements-yolox-overrides.txt \
+  "yolox @ git+https://github.com/Megvii-BaseDetection/YOLOX.git@6ddff4824372906469a7fae2dc3206c7aa4bbaee"
+# Required for MaCo in the CRAFT example; otherwise pass --skip-feature-viz
+uv pip install 'horama>=0.3.0'
 ```
 
 YOLOX-M's official pretrained checkpoint is downloaded automatically and cached
@@ -281,7 +290,7 @@ wrapper = RetinaNetBoxesModelWrapper(
 
 `YoloXBoxesModelWrapper` formats decoded YOLOX predictions for object-detection
 methods. `YoloXExtractorBuilder` splits the model at an FPN feature level for
-CRAFT. See the Installation section for the separate `yolox` extra and its
+CRAFT. See the Installation section for the separate upstream install and its
 pretrained-weight caching behavior.
 
 ```python

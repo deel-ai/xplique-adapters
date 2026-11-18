@@ -2,10 +2,6 @@
 requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
-[tool.uv]
-no-build-isolation-package = ["yolox"]
-override-dependencies = ["onnx-simplifier>=0.5.0"]
-
 [project]
 name = "xplique-adapters"
 version = "0.1.0"
@@ -42,7 +38,6 @@ retinanet = [
 torch = [
   "xplique[torch]>=2.0.0",
   "torch>=2.6,<2.11",
-  "horama>=0.3.0",
 ]
 torchvision = [
   "xplique-adapters[torch]",
@@ -58,12 +53,6 @@ detr = [
 yolo = [
   "xplique-adapters[torch]",
   "ultralytics>=8.4.120,<8.5",
-]
-# The PyPI YOLOX 0.3.0 sdist pins ONNX Runtime 1.8.0, unavailable on Python 3.12.
-# Pin upstream source at a commit with current runtime requirements instead.
-yolox = [
-  "xplique-adapters[torch]",
-  "yolox @ git+https://github.com/Megvii-BaseDetection/YOLOX.git@6ddff4824372906469a7fae2dc3206c7aa4bbaee",
 ]
 all = ["xplique-adapters[retinanet,torchvision,detr,yolo]"]
 
