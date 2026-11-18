@@ -25,6 +25,9 @@ from xplique.plots import plot_image_detections
 from xplique.utils_functions.object_detection.base.box_manager import BoxFormat, BoxType
 from xplique.utils_functions.common.torch.gradients_check import check_model_gradients
 
+from xplique_adapters.concepts.torch.latent_data_yolox import YoloXExtractorBuilder
+from xplique_adapters.object_detection.torch.yolox_wrappers import YoloXBoxesModelWrapper
+
 # ==============================================================================
 # Model Configurations
 # ==============================================================================
@@ -101,6 +104,19 @@ MODEL_CONFIGS = {
         "raw_wrapper_class": "Yolo26RawBoxesModelWrapper",
         "model_path": "yolo26n.pt",
     },
+    "yolox": {
+        "wrapper_class": "YoloXBoxesModelWrapper",
+        "wrapper_args": {},
+        "box_format": BoxFormat.XYXY,
+        "normalized": False,
+        "confidence": 0.1,
+        "use_weights_transform": False,
+        "image_size": (640, 640),
+        "has_latent_extractor": True,
+        "checkpoint_path": None,
+        "extraction_layer": -1,
+        "batch_size": 1,
+    },
 }
 
 # COCO classes with N/A (91 classes - for DETR, RetinaNet, FCOS, SSD)
@@ -148,11 +164,12 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Generate attribution explanations for object detection models"
     )
-    model_choices = ["detr", "fasterrcnn", "retinanet", "fcos", "ssd", "yolo11", "yolo26"]
+    default_models = ["detr", "fasterrcnn", "retinanet", "fcos", "ssd", "yolo11", "yolo26"]
+    model_choices = [*default_models, "yolox"]
     parser.add_argument("--model", choices=model_choices, help="Single model to use")
     parser.add_argument(
         "--models", nargs="+", choices=model_choices,
-        help="Models to run in one invocation (defaults to all models)"
+        help="Models to run in one invocation (YOLOX is opt-in)"
     )
     parser.add_argument(
         "--classes", nargs="+", default=None,
@@ -172,12 +189,18 @@ def parse_args():
                         help="Output directory (default: torch_{model}_attributions)")
     parser.add_argument("--image", type=str, default=None,
                         help="Path to input image (default: img.jpg for most models)")
+    parser.add_argument(
+        "--yolox-checkpoint",
+        default=None,
+        help=("Optional local YOLOX-m checkpoint; default downloads and caches "
+              "the pretrained weights"),
+    )
     parser.add_argument("--detect-only", action="store_true",
                         help="Only generate detection visualizations, skip attribution generation")
     args = parser.parse_args()
     if args.model and args.models:
         parser.error("Use either --model or --models, not both")
-    args.models = args.models or ([args.model] if args.model else model_choices)
+    args.models = args.models or ([args.model] if args.model else default_models)
     return args
 
 # ==============================================================================
@@ -249,6 +272,21 @@ def load_model(model_name, config, device):
         # whatever the head's end2end flag (off by default from Ultralytics 8.4.142).
         return model, None
 
+    elif model_name == "yolox":
+        try:
+            from yolox.models.build import yolox_m
+        except ImportError as error:
+            raise ImportError("Install upstream YOLOX separately; see README.md.") from error
+
+        checkpoint_path = config.get("checkpoint_path")
+        if checkpoint_path is not None and not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(f"YOLOX checkpoint not found: {checkpoint_path}")
+        model = yolox_m(pretrained=checkpoint_path is None, device=str(device))
+        if checkpoint_path is not None:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            model.load_state_dict(checkpoint.get("model", checkpoint))
+        return model.eval(), None
+
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -287,6 +325,13 @@ def create_wrapper(model_name, model, config, device, use_raw_wrapper=False):
                 mode=mode,
                 device=str(device),
             )
+        elif model_name == "yolox":
+            return YoloXExtractorBuilder.build(
+                model,
+                extraction_layer=config.get("extraction_layer", -1),
+                batch_size=config.get("batch_size", 1),
+                device=str(device),
+            )
         else:
             raise ValueError(f"Raw wrapper not supported for model: {model_name}")
 
@@ -307,6 +352,8 @@ def create_wrapper(model_name, model, config, device, use_raw_wrapper=False):
         elif wrapper_class_name == "Yolo11RawBoxesModelWrapper":
             from xplique_adapters.object_detection.torch.yolo_wrappers import Yolo11RawBoxesModelWrapper
             wrapper_class = Yolo11RawBoxesModelWrapper
+        elif wrapper_class_name == "YoloXBoxesModelWrapper":
+            wrapper_class = YoloXBoxesModelWrapper
         else:
             wrapper_class = getattr(box_model_wrapper, wrapper_class_name)
         wrapper_args = config.get("wrapper_args", {})
@@ -329,6 +376,14 @@ def load_and_preprocess_image(image_path, model_name, config, weights, device):
         image_path = "img.jpg"
 
     image = Image.open(image_path).convert('RGB')
+    if model_name == "yolox":
+        from yolox.data.data_augment import preproc
+
+        rgb = np.asarray(image)
+        bgr_chw, _ = preproc(rgb[..., ::-1], config["image_size"])
+        tensor = torch.from_numpy(bgr_chw).unsqueeze(0)
+        display = Image.fromarray(bgr_chw[::-1].transpose(1, 2, 0).astype(np.uint8))
+        return display, tensor.flip(1) / 255.0, tensor.to(device)
 
     # Resize if needed
     if config["image_size"] is not None:
@@ -491,14 +546,20 @@ def run_model(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    config = MODEL_CONFIGS[args.model]
+    config = MODEL_CONFIGS[args.model].copy()
+    if args.model == "yolox":
+        config["checkpoint_path"] = args.yolox_checkpoint
 
     # Override confidence if provided
     if args.confidence is not None:
         config["confidence"] = args.confidence
 
     # Get class names (needed for output directory naming)
-    CLASSES = COCO_CLASSES_80 if args.model in ["yolo11", "yolo26"] else COCO_CLASSES_91
+    CLASSES = (
+        COCO_CLASSES_80
+        if args.model in ["yolo11", "yolo26", "yolox"]
+        else COCO_CLASSES_91
+    )
 
     # Validate requested classes
     for class_name in args.classes:
@@ -571,9 +632,7 @@ def run_model(args):
             # Assign a default color if class not in predefined mapping
             label_to_color[class_name] = default_colors[idx % len(default_colors)]
 
-    display_image = image.resize(config["image_size"]) if config["image_size"] else image
-    if config["normalized"]:
-        display_image = image
+    display_image = image
     # display_image = image.resize(config["image_size"]) if (config["image_size"] and not config["normalized"]) else image
 
     fig = plot_image_detections(
@@ -695,7 +754,7 @@ def run_model(args):
                             "NOTE: This is expected for DETR - "
                             "will use latent extractor in Phase 2"
                         )
-                    elif args.model == "yolo":
+                    elif args.model in ["yolo11", "yolo26", "yolox"]:
                         print(
                             "NOTE: This is expected for YOLO11/YOLO26 - "
                             "will use raw wrapper in Phase 2"
@@ -744,7 +803,7 @@ def run_model(args):
                     )
                 except Exception as e:
                     print(f"ERROR: {method} failed for {class_name}: {e}")
-                    if args.model in ["detr", "yolo"]:
+                    if args.model == "detr" or args.model in ["yolo11", "yolo26", "yolox"]:
                         print(
                             f"NOTE: This is expected for {args.model.upper()} - "
                             "will retry in Phase 2"
@@ -757,7 +816,7 @@ def run_model(args):
 
         except Exception as e:
             print(f"ERROR: {method} explainer creation failed: {e}")
-            if args.model in ["detr", "yolo"]:
+            if args.model == "detr" or args.model in ["yolo11", "yolo26", "yolox"]:
                 print(
                     f"NOTE: This is expected for {args.model.upper()} - "
                     "will retry in Phase 2"
@@ -767,7 +826,9 @@ def run_model(args):
     # PHASE 2: Alternative Wrapper (DETR and YOLO only)
     # ==========================================================================
     # Always run Phase 2 for DETR and YOLO when any Phase 1 method failed
-    needs_phase2 = (args.model == "detr" or args.model in ["yolo11", "yolo26"])
+    needs_phase2 = (
+        args.model == "detr" or args.model in ["yolo11", "yolo26", "yolox"]
+    )
     run_phase2 = needs_phase2 and not all(phase1_successful.values())
 
     if run_phase2:
@@ -781,7 +842,7 @@ def run_model(args):
         alt_model.output_as_tensor = True
 
         # Set suffix based on model type
-        suffix = "_latent" if args.model == "detr" else "_raw"
+        suffix = "_latent" if args.model in ["detr", "yolox"] else "_raw"
         print(f"{args.model.upper()} alternative wrapper built successfully!")
 
         # Prepare inputs and wrapped model based on model type
@@ -797,9 +858,9 @@ def run_model(args):
             # Input format: channel-last numpy array
             alt_inputs = processed_input.cpu().detach().numpy().transpose(0, 2, 3, 1)
 
-        elif args.model in ["yolo11", "yolo26"]:
-            # YOLO: Set training flag to False for TorchWrapper compatibility
-            alt_model.training = False
+        elif args.model in ["yolo11", "yolo26", "yolox"]:
+            # Keep the latent extractor's wrapped model in evaluation mode.
+            alt_model.eval()
             alt_wrapped_model = TorchWrapper(alt_model, device=device, is_channel_first=True, requires_grad=True)
 
             # Input format: TF tensor channel-last
@@ -859,7 +920,7 @@ def run_model(args):
             # Generate attributions for each class
             for class_name in args.classes:
                 # Use alternative boxes for YOLO, original for DETR
-                if args.model in ["yolo11", "yolo26"]:
+                if args.model in ["yolo11", "yolo26", "yolox"]:
                     boxes = alt_class_boxes[class_name]
                 else:
                     boxes = class_boxes[class_name]

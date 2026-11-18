@@ -28,6 +28,10 @@ from xplique_adapters.object_detection.torch.yolo_wrappers import (
     Yolo26RawBoxesModelWrapper,
     YoloResultBoxesModelWrapper,
 )
+from xplique_adapters.object_detection.torch.yolox_formatters import YoloXBoxFormatter
+from xplique_adapters.object_detection.torch.yolox_wrappers import (
+    YoloXBoxesModelWrapper,
+)
 
 __all__ = [
     "DetrBoxFormatter",
@@ -42,4 +46,6 @@ __all__ = [
     "YoloOneToOneFormatter",
     "YoloResultBoxFormatter",
     "YoloResultBoxesModelWrapper",
+    "YoloXBoxFormatter",
+    "YoloXBoxesModelWrapper",
 ]

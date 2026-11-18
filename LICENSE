@@ -31,6 +31,7 @@ projects and are subject to their respective licenses, not the MIT License:
 - DETR and TensorFlow RetinaNet: Apache License 2.0
 - PyTorch RetinaNet, FCOS, SSD, and Faster R-CNN: BSD 3-Clause License
 - YOLO: GNU Affero General Public License v3.0
+- YOLOX: Apache License 2.0
 
 The complete third-party license texts and their associated notices are in the
 `LICENSES/` directory. The applicable upstream source and license are also

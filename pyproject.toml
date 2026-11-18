@@ -105,6 +105,7 @@ markers = [
   "detr: tests requiring DETR model (transformers library)",
   "retinanet: tests requiring RetinaNet model (keras_cv library)",
   "yolo: tests requiring YOLO model (ultralytics library)",
+  "yolox: integration tests requiring the upstream YOLOX package",
   "torchvision: tests requiring torchvision models",
   "cuda: tests requiring CUDA/GPU",
   "slow: slow-running integration tests",
