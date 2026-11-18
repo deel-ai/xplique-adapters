@@ -28,6 +28,8 @@ from xplique.utils_functions.common.torch.gradients_check import check_model_gra
 from xplique_adapters.concepts.torch.latent_data_yolox import YoloXExtractorBuilder
 from xplique_adapters.object_detection.torch.yolox_wrappers import YoloXBoxesModelWrapper
 
+from yolox_example import load_yolox_model, prepare_yolox_image
+
 # ==============================================================================
 # Model Configurations
 # ==============================================================================
@@ -164,13 +166,12 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Generate attribution explanations for object detection models"
     )
-    model_choices = [
-        "detr", "fasterrcnn", "retinanet", "fcos", "ssd", "yolo11", "yolo26", "yolox"
-    ]
+    default_models = ["detr", "fasterrcnn", "retinanet", "fcos", "ssd", "yolo11", "yolo26"]
+    model_choices = [*default_models, "yolox"]
     parser.add_argument("--model", choices=model_choices, help="Single model to use")
     parser.add_argument(
         "--models", nargs="+", choices=model_choices,
-        help="Models to run in one invocation (defaults to all models)"
+        help="Models to run in one invocation (YOLOX is opt-in)"
     )
     parser.add_argument(
         "--classes", nargs="+", default=None,
@@ -201,7 +202,7 @@ def parse_args():
     args = parser.parse_args()
     if args.model and args.models:
         parser.error("Use either --model or --models, not both")
-    args.models = args.models or ([args.model] if args.model else model_choices)
+    args.models = args.models or ([args.model] if args.model else default_models)
     return args
 
 # ==============================================================================
@@ -274,22 +275,7 @@ def load_model(model_name, config, device):
         return model, None
 
     elif model_name == "yolox":
-        try:
-            from yolox.models.build import yolox_m
-        except ImportError as error:
-            raise ImportError(
-                "YOLOX and its runtime dependencies are required. "
-                "Install the xplique-adapters[yolox] extra; see README.md."
-            ) from error
-        checkpoint_path = config.get("checkpoint_path")
-        if checkpoint_path is not None and not os.path.isfile(checkpoint_path):
-            raise FileNotFoundError(f"YOLOX checkpoint not found: {checkpoint_path}")
-        model = yolox_m(pretrained=checkpoint_path is None, device=str(device))
-        if checkpoint_path is not None:
-            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-            state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-            model.load_state_dict(state_dict)
-        return model.eval(), None
+        return load_yolox_model(device, config.get("checkpoint_path")), None
 
     else:
         raise ValueError(f"Unknown model: {model_name}")
@@ -380,6 +366,9 @@ def load_and_preprocess_image(image_path, model_name, config, weights, device):
         image_path = "img.jpg"
 
     image = Image.open(image_path).convert('RGB')
+    if model_name == "yolox":
+        tensor, display = prepare_yolox_image(image, config["image_size"])
+        return display, tensor.flip(0).unsqueeze(0) / 255.0, tensor.unsqueeze(0).to(device)
 
     # Resize if needed
     if config["image_size"] is not None:
@@ -399,8 +388,6 @@ def load_and_preprocess_image(image_path, model_name, config, weights, device):
             T.Normalize(config["custom_normalize"][0], config["custom_normalize"][1])
         ])
         processed_input = transform(visualizable_input).to(device)
-    elif model_name == "yolox":
-        processed_input = (visualizable_input * 255.0).to(device)
     else:
         # YOLO - use raw tensors
         processed_input = visualizable_input.to(device)
@@ -630,9 +617,7 @@ def run_model(args):
             # Assign a default color if class not in predefined mapping
             label_to_color[class_name] = default_colors[idx % len(default_colors)]
 
-    display_image = image.resize(config["image_size"]) if config["image_size"] else image
-    if config["normalized"]:
-        display_image = image
+    display_image = image
     # display_image = image.resize(config["image_size"]) if (config["image_size"] and not config["normalized"]) else image
 
     fig = plot_image_detections(

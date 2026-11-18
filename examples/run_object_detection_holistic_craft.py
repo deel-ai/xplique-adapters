@@ -9,7 +9,6 @@ import torch
 import torchvision.transforms as T
 from PIL import Image
 from pycocotools.coco import COCO
-from horama import maco, plot_maco
 
 import xplique
 from xplique.concepts import HolisticCraftTf as CraftTf
@@ -20,6 +19,8 @@ from xplique.utils_functions.object_detection.base.box_manager import BoxFormat,
 import tensorflow as tf
 
 from xplique_adapters.concepts.torch.latent_data_yolox import YoloXExtractorBuilder
+
+from yolox_example import load_yolox_model, prepare_yolox_image
 
 # Prevent TensorFlow from pre-allocating all GPU memory
 _tf_gpus = tf.config.experimental.list_physical_devices('GPU')
@@ -108,7 +109,6 @@ MODEL_CONFIGS = {
     "yolox": {
         "image_size": (640, 640),
         "use_weights_transform": False,
-        "custom_transform": "yolox",
         "box_format": BoxFormat.XYXY,
         "normalized": False,
         "confidence": 0.1,
@@ -301,22 +301,7 @@ def load_model(model_name, config, device, framework="torch"):
         return model, weights
 
     if model_name == "yolox":
-        try:
-            from yolox.models.build import yolox_m
-        except ImportError as error:
-            raise ImportError(
-                "YOLOX and its runtime dependencies are required. "
-                "Install the xplique-adapters[yolox] extra; see README.md."
-            ) from error
-        checkpoint_path = config.get("checkpoint_path")
-        if checkpoint_path is not None and not os.path.isfile(checkpoint_path):
-            raise FileNotFoundError(f"YOLOX checkpoint not found: {checkpoint_path}")
-        model = yolox_m(pretrained=checkpoint_path is None, device=str(device))
-        if checkpoint_path is not None:
-            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-            state_dict = checkpoint.get("model", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-            model.load_state_dict(state_dict)
-        return model.eval(), None
+        return load_yolox_model(device, config.get("checkpoint_path")), None
 
     if model_name in ["yolo11", "yolo26"]:
         from ultralytics import YOLO
@@ -442,7 +427,11 @@ def preprocess_images(raw_images, model_name, config, weights=None, framework="t
             input_tensors = raw_images
         input_tensors = [preprocess(img) for img in input_tensors]
         input_tensor = torch.stack(input_tensors, dim=0)
-    elif model_name in ["yolo11", "yolo26", "yolox"]:
+    elif model_name == "yolox":
+        input_tensor = torch.stack([
+            prepare_yolox_image(img, config["image_size"])[0] for img in raw_images
+        ])
+    elif model_name in ["yolo11", "yolo26"]:
         if config["image_size"] is not None:
             transform = T.Compose([T.Resize(config["image_size"]), T.ToTensor()])
         else:
@@ -451,8 +440,6 @@ def preprocess_images(raw_images, model_name, config, weights=None, framework="t
             ])
         input_tensors = [transform(img).unsqueeze(0) for img in raw_images]
         input_tensor = torch.cat(input_tensors, dim=0)
-        if model_name == "yolox":
-            input_tensor = input_tensor * 255.0
     else:
         # DETR and similar models
         if config["image_size"] is not None:
@@ -504,9 +491,13 @@ def create_factorizer(nmf_type, num_concepts, device):
 
 def plot_concepts_feature_viz(craft, _input_tensor, indices_to_plot, device,
                               model_input_size, output_dir, suffix="", file_number=10,
-                              crops_per_iteration=2, total_steps=100):
+                              crops_per_iteration=2, total_steps=100, model_name=None):
     """Generate and save feature visualizations for selected concepts."""
+    from horama import maco, plot_maco
+
     def objective(images, concept_id=0):
+        if model_name == "yolox":
+            images = images.flip(1).clamp(0, 1) * 255.0
         latent_data_and_coeffs_u = craft.encode(images, differentiable=True)
         coeffs_u_list = [pair.coeffs_u for pair in latent_data_and_coeffs_u]
         coeffs_u = torch.cat(coeffs_u_list)
@@ -518,11 +509,12 @@ def plot_concepts_feature_viz(craft, _input_tensor, indices_to_plot, device,
     n = len(indices_to_plot)
     _fig, axes = plt.subplots(1, n, figsize=(5 * n, 5))
 
+    maco_kwargs = {"values_range": (0.0, 1.0)} if model_name == "yolox" else {}
     for i, idx in enumerate(indices_to_plot):
         image1, alpha1 = maco(objective_for_concept(idx), model_input_size=model_input_size,
                              crops_per_iteration=crops_per_iteration, device=device,
                              total_steps=total_steps,
-                             noise=0.5, box_size=(0.30, 0.35))
+                             noise=0.5, box_size=(0.30, 0.35), **maco_kwargs)
         ax = axes[i] if n > 1 else axes
         plt.sca(ax)
         plot_maco(image1, alpha1)
@@ -751,10 +743,13 @@ def run_craft(args, output_dir=None, device_override=None):
         confidence=config["confidence"]
     )
 
-    display_image = (
-        display_raw_image.resize(config["image_size"])
-        if config["image_size"] else display_raw_image
-    )
+    if args.model == "yolox":
+        _, display_image = prepare_yolox_image(display_raw_image, config["image_size"])
+    else:
+        display_image = (
+            display_raw_image.resize(config["image_size"])
+            if config["image_size"] else display_raw_image
+        )
 
     _fig = plot_image_detections(
         display_image, box_to_display,
@@ -793,13 +788,22 @@ def run_craft(args, output_dir=None, device_override=None):
     craft.fit(input_tensor)
     print("CRAFT fitting completed")
 
+    def plot_inputs(images):
+        if args.model == "yolox":
+            # Compute activations on BGR input, but show RGB in the overlays.
+            return images.cpu().flip(1) / 255.0, {"coeffs_u": craft.transform(images)}
+        return images, {}
+
+    display_plots, display_kwargs = plot_inputs(display_input_tensor)
+    dataset_plots, dataset_kwargs = plot_inputs(input_tensor)
+
     print("\n" + "="*80)
     print("8. Displaying Concepts")
     print("="*80)
 
     _fig = craft.display_images_per_concept(
-        display_input_tensor, order=None,
-        filter_percentile=80, clip_percentile=5
+        display_plots, order=None,
+        filter_percentile=80, clip_percentile=5, **display_kwargs
     )
 
     output_path = os.path.join(output_dir, "03_concepts_unordered.png")
@@ -809,11 +813,11 @@ def run_craft(args, output_dir=None, device_override=None):
 
     # Display top images per concept
     _fig = craft.display_top_images_per_concept(
-        input_tensor,
+        dataset_plots,
         topk=5,
         filter_percentile=80,
         clip_percentile=5,
-        order=None
+        order=None, **dataset_kwargs
     )
     output_path = os.path.join(output_dir, "03b_top_images_per_concept_unordered.png")
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -853,8 +857,8 @@ def run_craft(args, output_dir=None, device_override=None):
 
     # Display concepts ordered by Gradient Input
     _fig = craft.display_images_per_concept(
-        display_input_tensor, order=order_gi,
-        filter_percentile=80, clip_percentile=5
+        display_plots, order=order_gi,
+        filter_percentile=80, clip_percentile=5, **display_kwargs
     )
 
     output_path = os.path.join(output_dir, "04_concepts_ordered_gi.png")
@@ -881,11 +885,11 @@ def run_craft(args, output_dir=None, device_override=None):
     # Use Gradient Input order for top images
     # Generate top images for Gradient Input (still showing all images, but ordered by importance)
     _fig = craft.display_top_images_per_concept(
-        input_tensor,
+        dataset_plots,
         topk=5,
         filter_percentile=80,
         clip_percentile=5,
-        order=order_gi
+        order=order_gi, **dataset_kwargs
     )
 
     output_path = os.path.join(output_dir, "06_top_images_per_concept_gi.png")
@@ -980,8 +984,12 @@ def run_craft(args, output_dir=None, device_override=None):
         # Convert GT boxes from XYWH (original pixel coords) to XYXY (resized pixel coords)
         img_info = coco.loadImgs(img_id)[0]
         orig_w, orig_h = img_info["width"], img_info["height"]
-        scale = np.array([images_size[0] / orig_w, images_size[1] / orig_h,
-                          images_size[0] / orig_w, images_size[1] / orig_h])
+        if args.model == "yolox":
+            # Upstream anchors the resized image at the canvas origin.
+            scale = min(images_size[0] / orig_h, images_size[1] / orig_w)
+        else:
+            scale = np.array([images_size[0] / orig_w, images_size[1] / orig_h,
+                              images_size[0] / orig_w, images_size[1] / orig_h])
 
         gt_xywh = np.array([ann["bbox"] for ann in anns], dtype=np.float32)
         gt_xyxy = NumpyBoxManager.box_xywh_to_xyxy(gt_xywh) * scale
@@ -1033,8 +1041,8 @@ def run_craft(args, output_dir=None, device_override=None):
 
         # Display concepts ordered by Sobol (if run)
         _fig = craft.display_images_per_concept(
-            display_input_tensor, order=order_sobol,
-            filter_percentile=80, clip_percentile=5
+            display_plots, order=order_sobol,
+            filter_percentile=80, clip_percentile=5, **display_kwargs
         )
 
         output_path = os.path.join(output_dir, "07_concepts_ordered_sobol.png")
@@ -1056,11 +1064,11 @@ def run_craft(args, output_dir=None, device_override=None):
 
         # Generate top images for Sobol (if run)
         _fig = craft.display_top_images_per_concept(
-            input_tensor,
+            dataset_plots,
             topk=5,
             filter_percentile=80,
             clip_percentile=5,
-            order=order_sobol
+            order=order_sobol, **dataset_kwargs
         )
 
         output_path = os.path.join(output_dir, "09_top_images_per_concept_sobol.png")
@@ -1094,6 +1102,7 @@ def run_craft(args, output_dir=None, device_override=None):
             suffix="gi", file_number=10,
             crops_per_iteration=args.feature_viz_crops_per_iteration,
             total_steps=args.feature_viz_total_steps,
+            model_name=args.model,
         )
 
         # Feature viz for Sobol (if run)
@@ -1104,6 +1113,7 @@ def run_craft(args, output_dir=None, device_override=None):
                 suffix="sobol", file_number=11,
                 crops_per_iteration=args.feature_viz_crops_per_iteration,
                 total_steps=args.feature_viz_total_steps,
+                model_name=args.model,
             )
 
     print("\n" + "="*80)

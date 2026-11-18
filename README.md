@@ -66,7 +66,8 @@ uv pip install 'horama>=0.3.0'
 ```
 
 YOLOX-M's official pretrained checkpoint is downloaded automatically and cached
-by PyTorch on first use. To use different local weights, pass their path with
+by PyTorch on first use when YOLOX is explicitly selected (`--model yolox`,
+or `--models yolox` in the boxes example). To use different local weights, pass their path with
 `--yolox-checkpoint`.
 
 ---
