@@ -8,7 +8,7 @@ from xplique_adapters.object_detection.torch import (
 )
 
 
-def test_yolox_formatter_converts_boxes_and_preserves_objectness():
+def test_yolox_formatter_converts_boxes_and_computes_joint_confidence():
     formatter = YoloXBoxFormatter()
     predictions = torch.tensor([[[100.0, 200.0, 40.0, 80.0, 0.7, 0.2, 0.9]]])
 

@@ -16,9 +16,10 @@ from xplique.utils_functions.object_detection.torch.multi_box_tensor import (
 class YoloXBoxFormatter(TorchBaseBoxFormatter):
     """Format decoded YOLOX output ``(B, anchors, 5 + classes)``.
 
-    YOLOX outputs absolute CXCYWH coordinates, sigmoid objectness scores, and
-    sigmoid class probabilities. The objectness score remains separate from
-    class probabilities, matching Xplique's MultiBoxTensor representation.
+    YOLOX outputs absolute CXCYWH coordinates, sigmoid objectness, and sigmoid
+    class probabilities. Column 4 is the joint detection confidence
+    (objectness times the highest class probability) used for filtering and
+    attribution. The class probability vector is kept unchanged.
     """
 
     def __init__(self) -> None:

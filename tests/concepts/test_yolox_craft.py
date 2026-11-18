@@ -13,6 +13,7 @@ from xplique_adapters.concepts.torch.latent_data_yolox import (
     LatentDataYoloX,
     YoloXExtractorBuilder,
 )
+from xplique_adapters.object_detection.torch import YoloXBoxFormatter
 
 test_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -47,7 +48,6 @@ def image_data(device_param):
 
 @pytest.fixture(scope="function")
 def model_data(image_data, device_param):
-    pytest.importorskip("yolox")
     from yolox.exp.default.yolox_m import Exp
 
     _image, input_tensor = image_data
@@ -57,6 +57,7 @@ def model_data(image_data, device_param):
     return model, predictions
 
 
+@pytest.mark.yolox
 def test_model_outputs(image_data, model_data):
     _image, input_tensor = image_data
     _model, predictions = model_data
@@ -67,7 +68,6 @@ def test_model_outputs(image_data, model_data):
 
 @pytest.fixture(scope="function")
 def dataset_classes():
-    pytest.importorskip("yolox")
     from yolox.data.datasets.coco_classes import COCO_CLASSES
 
     class_names = list(COCO_CLASSES)
@@ -88,7 +88,9 @@ def latent_extractor_data(dataset_classes, model_data, device_param):
 
 
 @pytest.mark.yolox
-def test_latent_extractor(image_data, dataset_classes, latent_extractor_data):
+def test_latent_extractor(
+    image_data, dataset_classes, latent_extractor_data, model_data
+):
     _image, input_tensor = image_data
     class_names, num_classes, _label_to_color = dataset_classes
 
@@ -102,6 +104,7 @@ def test_latent_extractor(image_data, dataset_classes, latent_extractor_data):
     assert isinstance(results[0], TorchMultiBoxTensor)
     assert results[0].shape == (84, 5 + num_classes)
     assert torch.isfinite(results[0]).all()
+    torch.testing.assert_close(results[0], YoloXBoxFormatter()(model_data[1])[0])
 
 
 @pytest.mark.yolox
@@ -119,7 +122,6 @@ def test_latent_extractor_gradients(image_data, latent_extractor_data):
 
 @pytest.fixture(scope="function")
 def craft_data(image_data, latent_extractor_data, device_param):
-    pytest.importorskip("overcomplete")
     from overcomplete.optimization import SemiNMF
     from xplique.concepts.torch.factorizer import OvercompleteFactorizer
 
@@ -199,8 +201,10 @@ def test_latent_data_round_trip_and_expand_other_levels():
     latent_data.set_activations(activations.expand(3, -1, -1, -1))
 
     assert latent_data.fpn_outs[1].shape == (3, 4, 4, 4)
-    assert latent_data.fpn_outs[0].shape[0] == 3
-    assert latent_data.fpn_outs[2].shape[0] == 3
+    for index in (0, 2):
+        torch.testing.assert_close(
+            latent_data.fpn_outs[index], features[index].expand(3, -1, -1, -1)
+        )
     assert len(latent_data) == 3
     assert latent_data.to(torch.device("cpu")).extraction_layer == 1
 

@@ -292,6 +292,9 @@ wrapper = RetinaNetBoxesModelWrapper(
 methods. `YoloXExtractorBuilder` splits the model at an FPN feature level for
 CRAFT. See the Installation section for the separate upstream install and its
 pretrained-weight caching behavior.
+The formatter exposes decoded boxes in input-canvas pixels before NMS. Column 4
+is YOLOX's joint confidence (objectness times the highest class probability),
+used for both thresholding and attribution; the class probability vector is unchanged.
 
 ```python
 from yolox.models.build import yolox_m
