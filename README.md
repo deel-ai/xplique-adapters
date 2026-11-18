@@ -58,8 +58,8 @@ libraries required by OpenCV (for example, `libgl1` on Ubuntu):
 uv venv --python 3.12 .venv-yolox
 source .venv-yolox/bin/activate
 uv pip install -e '.[torch]' setuptools wheel 'matplotlib<3.11'
-uv pip install --no-build-isolation-package yolox \
-  --overrides requirements-yolox-overrides.txt \
+printf '%s\n' 'onnx-simplifier>=0.5.0' | \
+  uv pip install --no-build-isolation-package yolox --overrides - \
   "yolox @ git+https://github.com/Megvii-BaseDetection/YOLOX.git@6ddff4824372906469a7fae2dc3206c7aa4bbaee"
 # Required for MaCo in the CRAFT example; otherwise pass --skip-feature-viz
 uv pip install 'horama>=0.3.0'

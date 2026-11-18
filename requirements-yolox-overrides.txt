@@ -1,2 +1,0 @@
-# The pinned upstream source requires 0.4.10, which lacks Python 3.12 wheels.
-onnx-simplifier>=0.5.0
